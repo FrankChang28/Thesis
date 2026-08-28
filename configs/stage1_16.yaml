@@ -1,0 +1,6 @@
+# Sensitivity experiment: same pipeline, 16-dimensional representation.
+data_dir: ./data
+experiment_name: relat_cons_16
+latent_dim: 16
+epochs: 200
+save_csv: false

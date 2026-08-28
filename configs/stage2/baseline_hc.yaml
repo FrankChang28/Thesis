@@ -1,0 +1,8 @@
+target_mode: hc
+experiment_mode: baseline
+baseline_init: scratch
+baseline_train: finetune
+run_name_suffix: main
+resume: true
+# Required by notebook 04 for calibration and subject-level distributions.
+save_predictions: true

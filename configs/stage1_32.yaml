@@ -1,0 +1,6 @@
+# Main Stage 1 experiment used by Stage 2.
+data_dir: ./data
+experiment_name: relat_cons_32
+latent_dim: 32
+epochs: 200
+save_csv: false
