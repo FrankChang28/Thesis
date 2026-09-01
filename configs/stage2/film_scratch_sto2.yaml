@@ -1,0 +1,12 @@
+# FiLM operator with all trainable modules initialized from scratch.
+target_mode: sto2
+experiment_mode: fusion
+subject_feature_source: dtof
+structure_control: actual
+baseline_init: scratch
+baseline_train: finetune
+fusion_method: film
+structure_feature_dim: 32
+structure_feature_path: ./artifacts/stage1/{test_id}/relat_cons_32/subject_features_all_op.npz
+run_name_suffix: main
+resume: true

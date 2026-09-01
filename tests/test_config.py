@@ -23,6 +23,13 @@ def test_film_and_16d_remain_configurable() -> None:
     assert cfg.structure_feature_dim == 16
 
 
+def test_concatenation_is_configurable() -> None:
+    cfg = Config()
+    apply_dataclass_config(cfg, {"fusion_method": "concatenation"})
+    cfg.validate()
+    assert cfg.fusion_method == "concatenation"
+
+
 def test_unknown_config_key_is_rejected() -> None:
     cfg = Config()
     try:

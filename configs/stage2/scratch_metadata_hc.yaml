@@ -1,0 +1,13 @@
+# Development ablation: jointly train DRS and metadata residual fusion from scratch.
+target_mode: hc
+experiment_mode: fusion
+subject_feature_source: metadata
+structure_control: actual
+baseline_init: scratch
+baseline_train: finetune
+fusion_method: residual
+residual_use_gate: true
+structure_feature_dim: 4
+metadata_feature_path: ./data/temp_metadata_v2.csv
+run_name_suffix: development
+resume: true

@@ -211,6 +211,48 @@ class BaselineFusionModel(nn.Module, ABC):
         """Return the adapted DRS embedding and diagnostic tensors."""
 
 
+class ConcatenationBaselineCNN(BaselineFusionModel):
+    """Concatenate projected subject and DRS features, then remap to 64D."""
+
+    def __init__(
+        self,
+        baseline: CNN1D,
+        latent_dim: int,
+        output_dim: int = 1,
+        freeze_baseline: bool = True,
+    ) -> None:
+        del output_dim  # The baseline already owns the shared regression head.
+        super().__init__(baseline, latent_dim, freeze_baseline)
+
+        self.latent_proj = nn.Sequential(
+            nn.Linear(self.latent_dim, self.embedding_dim),
+            nn.ReLU(),
+            nn.Dropout(CFG.dropout),
+            nn.Linear(self.embedding_dim, self.embedding_dim),
+        )
+        self.fusion_mlp = nn.Sequential(
+            nn.Linear(2 * self.embedding_dim, self.embedding_dim),
+            nn.ReLU(),
+            nn.Dropout(CFG.dropout),
+        )
+
+    def adapt_embedding(
+        self,
+        drs_embedding: torch.Tensor,
+        latent: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        projected_latent = self.latent_proj(latent)
+        concatenated_features = torch.cat(
+            [drs_embedding, projected_latent],
+            dim=1,
+        )
+        fused_embedding = self.fusion_mlp(concatenated_features)
+        return fused_embedding, {
+            "projected_latent": projected_latent,
+            "concatenated_features": concatenated_features,
+        }
+
+
 class BaselineResidualCNN(BaselineFusionModel):
     """Add a gated latent projection to the DRS embedding."""
 
@@ -307,6 +349,7 @@ class FiLMBaselineCNN(BaselineFusionModel):
 
 
 FUSION_MODEL_REGISTRY: dict[str, Type[BaselineFusionModel]] = {
+    "concatenation": ConcatenationBaselineCNN,
     "residual": BaselineResidualCNN,
     "film": FiLMBaselineCNN,
 }

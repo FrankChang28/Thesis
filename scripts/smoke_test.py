@@ -20,7 +20,7 @@ def main() -> None:
     baseline = CNN1D(output_dim=1)
     assert baseline(x).shape == (2, 1)
 
-    for method in ("residual", "film"):
+    for method in ("concatenation", "residual", "film"):
         fusion = build_baseline_fusion_model(
             method,
             baseline=CNN1D(output_dim=1),
@@ -31,8 +31,26 @@ def main() -> None:
             residual_gate_init_logit=0.0,
         )
         assert fusion(x, latent).shape == (2, 1)
+        if method == "concatenation":
+            assert fusion.latent_proj[0].in_features == CFG.structure_feature_dim
+            assert fusion.latent_proj[0].out_features == 64
+            assert fusion.latent_proj[3].in_features == 64
+            assert fusion.latent_proj[3].out_features == 64
+            assert fusion.fusion_mlp[0].in_features == 128
+            assert fusion.fusion_mlp[0].out_features == 64
+            assert fusion.latent_proj[2].p == CFG.dropout
+            assert fusion.fusion_mlp[2].p == CFG.dropout
+            parts = fusion(x, latent, return_parts=True)
+            assert parts["projected_latent"].shape == (2, 64)
+            assert parts["concatenated_features"].shape == (2, 128)
+            assert parts["adapted_drs_embedding"].shape == (2, 64)
+            assert "gate" not in parts
+            assert "residual" not in parts
 
-    print("smoke test: Stage 1 (32D), baseline, residual, and FiLM are OK")
+    print(
+        "smoke test: Stage 1 (32D), baseline, concatenation, residual, "
+        "and FiLM are OK"
+    )
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ TargetMode = Literal["hc", "sto2"]
 ExperimentMode = Literal["baseline", "fusion"]
 BaselineInit = Literal["scratch", "pretrained"]
 BaselineTrain = Literal["frozen", "finetune"]
-FusionMethod = Literal["residual", "film"]
+FusionMethod = Literal["concatenation", "residual", "film"]
 StructureControl = Literal["actual", "zero", "shuffle"]
 SubjectFeatureSource = Literal["dtof", "metadata"]
 
@@ -289,8 +289,10 @@ class Config:
             raise ValueError("baseline_init must be 'scratch' or 'pretrained'")
         if self.baseline_train not in {"frozen", "finetune"}:
             raise ValueError("baseline_train must be 'frozen' or 'finetune'")
-        if self.fusion_method not in {"residual", "film"}:
-            raise ValueError("fusion_method must be 'residual' or 'film'")
+        if self.fusion_method not in {"concatenation", "residual", "film"}:
+            raise ValueError(
+                "fusion_method must be 'concatenation', 'residual', or 'film'"
+            )
         if self.subject_feature_source not in {"dtof", "metadata"}:
             raise ValueError("subject_feature_source must be 'dtof' or 'metadata'")
         if self.structure_control not in {"actual", "zero", "shuffle"}:
