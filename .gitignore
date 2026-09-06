@@ -19,10 +19,7 @@ cache/
 *.h5
 
 # Generated analysis tables are reproducible; curated figures may be committed.
-results/tables/**/*.csv
-results/tables/**/*.json
-results/figures/**/*.pdf
-results/figures/**/*.json
+/results/
 
 # Editors and OS
 .history/
