@@ -162,7 +162,16 @@ def completed_test_ids(
             continue
         if fold_by_test_id.get(test_id) != fold:
             continue
-        if not model_path or not os.path.isfile(model_path):
+        if not model_path:
+            continue
+        model_exists = os.path.isfile(model_path)
+        if not model_exists:
+            # Artifact directories may be reorganized without rewriting the
+            # immutable historical CSV. Check the current experiment directory
+            # for the recorded checkpoint basename before rejecting the fold.
+            relocated_model_path = Path(results_path).parent / Path(model_path).name
+            model_exists = relocated_model_path.is_file()
+        if not model_exists:
             continue
         valid_by_test_id[test_id] = row
 

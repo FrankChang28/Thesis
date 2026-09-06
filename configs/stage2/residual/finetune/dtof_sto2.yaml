@@ -1,10 +1,9 @@
-# Main Stage 2 model.
 target_mode: sto2
 experiment_mode: fusion
 baseline_init: pretrained
 baseline_train: finetune
-fusion_method: film
-baseline_checkpoint_path: ./artifacts/stage2/sto2_baseline_scratch_main/best_model_fold_{fold:03d}_test_id_{test_id}.pth
+fusion_method: residual
+baseline_checkpoint_path: ./artifacts/stage2/baseline/sto2/best_model_fold_{fold:03d}_test_id_{test_id}.pth
 structure_feature_dim: 32
 structure_feature_path: ./artifacts/stage1/{test_id}/relat_cons_32/subject_features_all_op.npz
 run_name_suffix: main

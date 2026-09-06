@@ -1,4 +1,4 @@
-"""Evaluate frozen DRS-only HC or StO2 LOSO checkpoints on a validation cache.
+"""Evaluate frozen DRS-only HC or StO2 LOSO checkpoints on a separate dataset.
 
 This script never trains or selects a checkpoint.  For each fold it evaluates
 only that fold's LOSO test subject, so the reported rows are held out from both
@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run inference with frozen HC or StO2 baseline checkpoints on the "
-            "new mu_s validation cache."
+            "separate validation dataset."
         )
     )
     parser.add_argument(
@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint_dir",
         type=Path,
         default=None,
-        help="Defaults to artifacts/stage2/<target>_baseline_scratch_main.",
+        help="Defaults to artifacts/stage2/baseline/<target>.",
     )
     validation_group = parser.add_mutually_exclusive_group()
     validation_group.add_argument(
@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
         "--output_dir",
         type=Path,
         default=None,
-        help="Defaults to artifacts/stage2/unseen_scattering/<target>.",
+        help="Defaults to artifacts/stage2/unseen_dataset_validation/<target>.",
     )
     parser.add_argument(
         "--folds",
@@ -412,13 +412,15 @@ def main() -> None:
         raise ValueError("--batch_size must be positive")
     if args.checkpoint_dir is None:
         args.checkpoint_dir = Path(
-            f"./artifacts/stage2/{args.target}_baseline_scratch_main"
+            f"./artifacts/stage2/baseline/{args.target}"
         )
     if args.output_dir is None:
-        args.output_dir = Path(f"./artifacts/stage2/unseen_scattering/{args.target}")
+        args.output_dir = Path(
+            f"./artifacts/stage2/unseen_dataset_validation/{args.target}"
+        )
     if args.validation_mat is None and args.validation_cache is None:
         args.validation_mat = Path(
-            "./data/raw/stage2/NIRS_Absolute_Val_Dataset_new.mat"
+            "./data/NIRS_Absolute_Val_Dataset_new.mat"
         )
     selected_folds = parse_fold_spec(args.folds)
     checkpoints = discover_checkpoints(args.checkpoint_dir, selected_folds)
@@ -563,8 +565,8 @@ def main() -> None:
     write_csv(args.output_dir / "per_sim_metrics.csv", sim_rows)
     summary = {
         "description": (
-            "Frozen legacy DRS-only LOSO checkpoints evaluated on each fold's "
-            "test-subject rows from the new mu_s validation dataset."
+            "Frozen DRS-only LOSO checkpoints evaluated on each fold's "
+            "test-subject rows from a separate validation dataset."
         ),
         "target": args.target,
         "target_column": {"hc": "GM_hc", "sto2": "GM_StO2"}[args.target],

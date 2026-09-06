@@ -7,7 +7,7 @@ structure_control: actual
 baseline_init: pretrained
 baseline_train: finetune
 fusion_method: concatenation
-baseline_checkpoint_path: ./artifacts/stage2/hc_baseline_scratch_main/best_model_fold_{fold:03d}_test_id_{test_id}.pth
+baseline_checkpoint_path: ./artifacts/stage2/baseline/hc/best_model_fold_{fold:03d}_test_id_{test_id}.pth
 structure_feature_dim: 32
 structure_feature_path: ./artifacts/stage1/{test_id}/relat_cons_32/subject_features_all_op.npz
 run_name_suffix: main

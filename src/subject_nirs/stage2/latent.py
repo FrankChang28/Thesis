@@ -7,8 +7,8 @@ dtof:
     fold's training subjects only.
 
 metadata:
-    Four tissue-thickness features loaded from CSV columns 5:9 and min-max
-    normalized with the current fold's training subjects only.
+    Four tissue-thickness features loaded from CSV columns 5:9 and standardized
+    with the current fold's training subjects only.
 """
 
 from __future__ import annotations
@@ -102,27 +102,6 @@ def _standardize_from_training_subjects(
         normalized.astype(np.float32),
         mean.astype(np.float32),
         std.astype(np.float32),
-    )
-
-
-def _minmax_from_training_subjects(
-    features: np.ndarray,
-    train_subjects: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Min-max normalize every feature using training subjects only."""
-    train_values = features[train_subjects]
-
-    minimum = train_values.min(axis=0, keepdims=True)
-    maximum = train_values.max(axis=0, keepdims=True)
-    value_range = maximum - minimum
-    value_range = np.where(value_range < EPS, 1.0, value_range)
-
-    normalized = (features - minimum) / value_range
-
-    return (
-        normalized.astype(np.float32),
-        minimum.astype(np.float32),
-        maximum.astype(np.float32),
     )
 
 
@@ -328,14 +307,14 @@ def load_metadata_bank(
 
     thickness = metadata
 
-    normalized_thickness, _, _ = _minmax_from_training_subjects(
+    standardized_thickness, _, _ = _standardize_from_training_subjects(
         thickness,
         train_subjects,
     )
 
-    # Do not clip held-out thickness values. Values outside [0, 1] correctly
-    # indicate that a held-out subject lies outside the training range.
-    features = normalized_thickness.astype(np.float32)
+    # Do not clip held-out thickness values. Large absolute z-scores correctly
+    # indicate that a held-out subject lies far from the training distribution.
+    features = standardized_thickness.astype(np.float32)
 
     return features, str(path)
 

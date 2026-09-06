@@ -1,0 +1,13 @@
+# Layer-thickness FiLM fusion with a matching-fold DRS baseline.
+target_mode: sto2
+experiment_mode: fusion
+subject_feature_source: metadata
+structure_control: actual
+baseline_init: pretrained
+baseline_train: finetune
+fusion_method: film
+baseline_checkpoint_path: ./artifacts/stage2/baseline/sto2/best_model_fold_{fold:03d}_test_id_{test_id}.pth
+structure_feature_dim: 4
+metadata_feature_path: ./data/temp_metadata_v2.csv
+run_name_suffix: main
+resume: true

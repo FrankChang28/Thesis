@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PYTHON="${SUBJECT_NIRS_PYTHON:-python}"
-CONFIG="${1:-./configs/stage2/scratch_dtof_hc.yaml}"
+CONFIG="${1:-./configs/stage2/residual/finetune/dtof_hc.yaml}"
 
 export PYTHONPATH="./src"
 

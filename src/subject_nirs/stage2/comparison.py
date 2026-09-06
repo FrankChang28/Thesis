@@ -18,13 +18,13 @@ python -m subject_nirs.stage2.comparison \
 
 You can also specify experiments explicitly and override display labels:
 
-python compare_loso_result.py 
-    --experiment ./abs_CNN_grid/hc_baseline_scratch_new \
-    --experiment ./abs_CNN_grid/hc_concat_metadata \
-    --experiment "./abs_CNN_grid/hc_fusion_dtof_actual_pretrained_finetune_residual_gated_new=DTOF latent" \
-    --experiment ./abs_CNN_grid/sto2_baseline \
-    --experiment ./abs_CNN_grid/sto2_concat_metadata \
-    --experiment "./abs_CNN_grid/sto2_fusion_dtof_actual_pretrained_finetune_residual_gated=DTOF latent" \
+python -m subject_nirs.stage2.comparison \
+    --experiment ./artifacts/stage2/baseline/hc \
+    --experiment "./artifacts/stage2/concatenation/finetune/metadata/hc=Layer thickness" \
+    --experiment "./artifacts/stage2/residual/finetune/dtof/hc=DTOF latent" \
+    --experiment ./artifacts/stage2/baseline/sto2 \
+    --experiment "./artifacts/stage2/concatenation/finetune/metadata/sto2=Layer thickness" \
+    --experiment "./artifacts/stage2/residual/finetune/dtof/sto2=DTOF latent" \
     --output-dir ./comparison
 
 Outputs

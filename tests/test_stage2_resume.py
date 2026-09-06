@@ -44,7 +44,36 @@ def test_resume_keeps_only_complete_correctly_numbered_rows() -> None:
         assert results.with_name("loso_results.pre_resume_backup.csv").exists()
 
 
+def test_resume_accepts_checkpoint_relocated_with_experiment_directory() -> None:
+    with TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        relocated_model = root / "best_model_fold_001_test_id_0.pth"
+        relocated_model.touch()
+        results = root / "loso_results.csv"
+        historical_model = (
+            Path("artifacts/stage2/legacy_long_experiment_name")
+            / relocated_model.name
+        )
+        with results.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=["fold", "test_id", "test_loss", "model_path"],
+            )
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "fold": 1,
+                    "test_id": 0,
+                    "test_loss": 0.1,
+                    "model_path": historical_model,
+                }
+            )
+
+        assert completed_test_ids(str(results), {0: 1}) == {0}
+
+
 if __name__ == "__main__":
     test_subrange_keeps_global_fold_numbers()
     test_resume_keeps_only_complete_correctly_numbered_rows()
+    test_resume_accepts_checkpoint_relocated_with_experiment_directory()
     print("Stage 2 resume tests: OK")

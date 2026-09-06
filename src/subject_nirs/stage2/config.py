@@ -40,7 +40,7 @@ class Config:
     fusion_method: FusionMethod = "residual"
 
     baseline_checkpoint_path: Optional[str] = (
-        "./artifacts/stage2/hc_baseline_scratch_main/"
+        "./artifacts/stage2/baseline/hc/"
         "best_model_fold_{fold:03d}_test_id_{test_id}.pth"
     )
 
@@ -243,11 +243,32 @@ class Config:
         return "_".join(parts)
 
     @property
+    def training_strategy(self) -> str:
+        """Return the directory label used for the Stage 2 training strategy."""
+        return "scratch" if self.baseline_init == "scratch" else "finetune"
+
+    @property
+    def artifact_relative_dir(self) -> str:
+        """Return the compact, semantic path below ``output_root``."""
+        if self.experiment_mode == "baseline":
+            return os.path.join("baseline", self.target_mode)
+
+        feature_dir = self.subject_feature_source
+        if self.structure_control != "actual":
+            feature_dir = f"{feature_dir}_{self.structure_control}"
+        return os.path.join(
+            self.fusion_method,
+            self.training_strategy,
+            feature_dir,
+            self.target_mode,
+        )
+
+    @property
     def output_dir(self) -> str:
         if self.output_dir_override is not None:
             return os.path.normpath(os.path.expanduser(self.output_dir_override))
         return os.path.normpath(
-            os.path.join(os.path.expanduser(self.output_root), self.experiment_name)
+            os.path.join(os.path.expanduser(self.output_root), self.artifact_relative_dir)
         )
 
     @property
@@ -408,4 +429,4 @@ class Config:
 
 
 CFG = Config()
-DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
