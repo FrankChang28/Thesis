@@ -2,8 +2,8 @@
 """Compare LOSO regression experiments for HC and StO2.
 
 The script recursively discovers ``loso_results.csv`` files, reads the matching
-``experiment_config.json`` when available, and creates publication-ready figures
-and CSV summaries. It supports the current experiments:
+``experiment_config.json`` when available, excludes incomplete LOSO runs by
+default, and creates publication-ready figures and CSV summaries.
 
 - DRS-only baseline
 - DRS + layer-thickness features
@@ -33,12 +33,14 @@ Outputs
 - experiment_summary.csv
 - paired_vs_baseline.csv
 - conditional_effect_by_baseline_difficulty.csv
-- main_loso_comparison.png
+- final_experiment_table.csv
+- final_experiment_table_formatted.csv
+- representative_loso_comparison.png
 
-Only one publication figure is produced. The top row shows absolute RMSE
-distributions for all experiments, with paired Wilcoxon p-values versus the
-DRS-only model. The bottom row shows paired RMSE differences across common
-DRS-only-RMSE quartiles.
+The thesis table reports subject-level median [Q1, Q3] RMSE and bias, plus
+paired changes versus DRS only. The single figure is restricted to one matched
+fusion/training setting (residual + fine-tune by default), so feature-source
+effects are not confounded with the fusion operator.
 """
 
 from __future__ import annotations
@@ -78,6 +80,8 @@ class ExperimentMeta:
     training_mode: str
     feature_source: str
     structure_control: str
+    fusion_method: str
+    training_strategy: str
     label: str
 
 
@@ -129,6 +133,29 @@ def parse_args() -> argparse.Namespace:
         "--no-pdf",
         action="store_true",
         help="Do not save vector PDF copies of figures.",
+    )
+    parser.add_argument(
+        "--expected-subjects",
+        type=int,
+        default=154,
+        help="Expected unique LOSO subjects; incomplete runs are skipped (default: 154).",
+    )
+    parser.add_argument(
+        "--include-incomplete",
+        action="store_true",
+        help="Include runs with fewer than --expected-subjects subjects.",
+    )
+    parser.add_argument(
+        "--representative-method",
+        default="residual",
+        choices=("concatenation", "film", "residual"),
+        help="Fusion method shown in the representative figure.",
+    )
+    parser.add_argument(
+        "--representative-strategy",
+        default="finetune",
+        choices=("finetune", "scratch"),
+        help="Training strategy shown in the representative figure.",
     )
     return parser.parse_args()
 
@@ -274,7 +301,11 @@ def normalized_target_mode(value: object, fallback_name: str) -> str:
     return "hc" if fallback_name == "GM_hc" else "sto2"
 
 
-def infer_feature_source(config: dict, frame: pd.DataFrame, directory: Path) -> tuple[str, str, str]:
+def infer_experiment_dimensions(
+    config: dict,
+    frame: pd.DataFrame,
+    directory: Path,
+) -> tuple[str, str, str, str, str]:
     training_mode = str(
         config.get(
             "training_mode",
@@ -292,10 +323,11 @@ def infer_feature_source(config: dict, frame: pd.DataFrame, directory: Path) -> 
     ).strip().lower()
 
     source = str(config.get("subject_feature_source", "")).strip().lower()
-    path_text = directory.name.lower()
+    path_parts = {part.lower() for part in directory.parts}
+    path_text = "/".join(part.lower() for part in directory.parts)
 
-    if training_mode == "baseline" or "baseline" in path_text:
-        return "baseline", "baseline", "none"
+    if training_mode == "baseline" or "baseline" in path_parts:
+        return "baseline", "baseline", "none", "none", "scratch"
 
     if not source:
         if "metadata" in path_text or "handcraft" in path_text:
@@ -308,13 +340,34 @@ def infer_feature_source(config: dict, frame: pd.DataFrame, directory: Path) -> 
     if source == "dtof":
         source = "latent"
 
+    fusion_method = str(config.get("fusion_method", "")).strip().lower()
+    if not fusion_method:
+        fusion_method = next(
+            (item for item in ("concatenation", "film", "residual") if item in path_parts),
+            "unknown",
+        )
+
+    baseline_init = str(config.get("baseline_init", "")).strip().lower()
+    if baseline_init == "scratch" or "scratch" in path_parts:
+        training_strategy = "scratch"
+    elif baseline_init == "pretrained" or "finetune" in path_parts:
+        training_strategy = "finetune"
+    else:
+        training_strategy = "unknown"
+
     if not training_mode:
-        training_mode = "concat"
+        training_mode = fusion_method
 
-    return training_mode, source, control or "actual"
+    return training_mode, source, control or "actual", fusion_method, training_strategy
 
 
-def default_label(training_mode: str, source: str, control: str) -> str:
+def default_label(
+    training_mode: str,
+    source: str,
+    control: str,
+    fusion_method: str,
+    training_strategy: str,
+) -> str:
     if training_mode == "baseline" or source == "baseline":
         return "DRS only"
 
@@ -327,7 +380,15 @@ def default_label(training_mode: str, source: str, control: str) -> str:
 
     if control not in {"", "actual", "none", "nan"}:
         label = f"{label} ({control})"
-    return label
+    method_names = {
+        "concatenation": "Concatenation",
+        "film": "FiLM",
+        "residual": "Residual",
+    }
+    strategy_names = {"finetune": "Fine-tune", "scratch": "Scratch"}
+    method = method_names.get(fusion_method, fusion_method.title())
+    strategy = strategy_names.get(training_strategy, training_strategy.title())
+    return f"{label} | {method} | {strategy}"
 
 
 def metric_column(frame: pd.DataFrame, target_name: str, metric: str) -> str:
@@ -359,8 +420,12 @@ def load_experiment(spec: ExperimentSpec) -> tuple[ExperimentMeta, pd.DataFrame]
     target_mode = normalized_target_mode(config.get("target_mode"), inferred_target_name)
     target_name = "GM_hc" if target_mode == "hc" else "GM_StO2"
 
-    training_mode, source, control = infer_feature_source(config, frame, directory)
-    label = spec.label_override or default_label(training_mode, source, control)
+    training_mode, source, control, fusion_method, training_strategy = (
+        infer_experiment_dimensions(config, frame, directory)
+    )
+    label = spec.label_override or default_label(
+        training_mode, source, control, fusion_method, training_strategy
+    )
 
     subject_col = (
         "original_matlab_subj_id"
@@ -392,6 +457,8 @@ def load_experiment(spec: ExperimentSpec) -> tuple[ExperimentMeta, pd.DataFrame]
             "training_mode": training_mode,
             "feature_source": source,
             "structure_control": control,
+            "fusion_method": fusion_method,
+            "training_strategy": training_strategy,
             "subject_id": pd.to_numeric(frame[subject_col], errors="coerce").astype("Int64"),
         }
     )
@@ -411,6 +478,8 @@ def load_experiment(spec: ExperimentSpec) -> tuple[ExperimentMeta, pd.DataFrame]
         training_mode=training_mode,
         feature_source=source,
         structure_control=control,
+        fusion_method=fusion_method,
+        training_strategy=training_strategy,
         label=label,
     )
     return meta, tidy
@@ -478,6 +547,31 @@ def wilcoxon_pvalue(delta: np.ndarray) -> float:
         return float(wilcoxon(delta, alternative="two-sided", zero_method="wilcox").pvalue)
     except (ImportError, ValueError):
         return float("nan")
+
+
+def paired_rank_biserial(delta: np.ndarray) -> float:
+    """Return paired rank-biserial effect; positive values favor the experiment."""
+    values = np.asarray(delta, dtype=float)
+    values = values[np.isfinite(values) & ~np.isclose(values, 0.0)]
+    if values.size == 0:
+        return float("nan")
+    ranks = pd.Series(np.abs(values)).rank(method="average").to_numpy(dtype=float)
+    total = float(ranks.sum())
+    improvement = float(ranks[values < 0].sum())
+    worsening = float(ranks[values > 0].sum())
+    return (improvement - worsening) / total
+
+
+def holm_adjust(pvalues: pd.Series) -> pd.Series:
+    """Holm-adjust finite p-values while preserving the input index."""
+    adjusted = pd.Series(np.nan, index=pvalues.index, dtype=float)
+    finite = pvalues[np.isfinite(pvalues.to_numpy(dtype=float))].sort_values()
+    count = len(finite)
+    running = 0.0
+    for rank, (index, value) in enumerate(finite.items()):
+        running = max(running, min(1.0, float(value) * (count - rank)))
+        adjusted.loc[index] = running
+    return adjusted
 
 
 def resolve_baseline_label(target_frame: pd.DataFrame, requested_label: str) -> str | None:
@@ -558,6 +652,8 @@ def paired_comparisons(frame: pd.DataFrame, baseline_label: str) -> tuple[pd.Dat
                     "RMSE_tie_rate": float(np.mean(np.isclose(delta, 0))),
                     "delta_RMSE_mean": float(np.nanmean(delta)),
                     "delta_RMSE_median": float(np.nanmedian(delta)),
+                    "delta_RMSE_Q1": float(np.nanpercentile(delta, 25)),
+                    "delta_RMSE_Q3": float(np.nanpercentile(delta, 75)),
                     "delta_RMSE_IQR": float(
                         np.nanpercentile(delta, 75) - np.nanpercentile(delta, 25)
                     ),
@@ -566,12 +662,122 @@ def paired_comparisons(frame: pd.DataFrame, baseline_label: str) -> tuple[pd.Dat
                     ),
                     "delta_AbsBias_median": float(np.nanmedian(delta_abs_bias)),
                     "wilcoxon_RMSE_p": wilcoxon_pvalue(delta),
+                    "paired_rank_biserial": paired_rank_biserial(delta),
                 }
             )
 
     detail_frame = pd.concat(detail_rows, ignore_index=True) if detail_rows else pd.DataFrame()
     summary_frame = pd.DataFrame(summary_rows)
+    if not summary_frame.empty:
+        summary_frame["wilcoxon_RMSE_p_holm"] = summary_frame.groupby(
+            "target", group_keys=False
+        )["wilcoxon_RMSE_p"].apply(holm_adjust)
     return detail_frame, summary_frame
+
+
+def build_final_experiment_table(
+    frame: pd.DataFrame,
+    paired_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build the compact thesis table from subject-level LOSO results."""
+    rows: list[dict[str, object]] = []
+    for (target, experiment), group in frame.groupby(["target", "experiment"], sort=False):
+        rmse = group["RMSE"].dropna()
+        bias = group["Bias"].dropna()
+        first = group.iloc[0]
+        row: dict[str, object] = {
+            "target": target,
+            "feature_source": first["feature_source"],
+            "fusion_method": first["fusion_method"],
+            "training_strategy": first["training_strategy"],
+            "experiment": experiment,
+            "n_subjects": int(group["subject_id"].nunique()),
+            "rmse_median": float(rmse.median()),
+            "rmse_q1": float(rmse.quantile(0.25)),
+            "rmse_q3": float(rmse.quantile(0.75)),
+            "bias_median": float(bias.median()),
+            "bias_q1": float(bias.quantile(0.25)),
+            "bias_q3": float(bias.quantile(0.75)),
+            "n_paired_subjects": np.nan,
+            "delta_rmse_median": np.nan,
+            "delta_rmse_q1": np.nan,
+            "delta_rmse_q3": np.nan,
+            "improved_subjects_pct": np.nan,
+            "paired_rank_biserial": np.nan,
+            "wilcoxon_p": np.nan,
+        }
+        paired = paired_summary[
+            (paired_summary["target"] == target)
+            & (paired_summary["experiment"] == experiment)
+        ]
+        if not paired.empty:
+            result = paired.iloc[0]
+            row.update(
+                {
+                    "n_paired_subjects": int(result["n_paired_subjects"]),
+                    "delta_rmse_median": float(result["delta_RMSE_median"]),
+                    "improved_subjects_pct": 100.0 * float(result["RMSE_win_rate"]),
+                    "paired_rank_biserial": float(result["paired_rank_biserial"]),
+                    "wilcoxon_p": float(result["wilcoxon_RMSE_p"]),
+                }
+            )
+        rows.append(row)
+
+    table = pd.DataFrame(rows)
+    # Delta quartiles are retained in paired_summary to avoid reconstructing pairs here.
+    if not paired_summary.empty:
+        lookup = paired_summary.set_index(["target", "experiment"])
+        for index, row in table.iterrows():
+            key = (row["target"], row["experiment"])
+            if key in lookup.index:
+                paired = lookup.loc[key]
+                table.loc[index, "delta_rmse_q1"] = paired["delta_RMSE_Q1"]
+                table.loc[index, "delta_rmse_q3"] = paired["delta_RMSE_Q3"]
+
+    table["wilcoxon_p_holm"] = np.nan
+    for target in table["target"].drop_duplicates():
+        mask = (table["target"] == target) & table["wilcoxon_p"].notna()
+        table.loc[mask, "wilcoxon_p_holm"] = holm_adjust(table.loc[mask, "wilcoxon_p"])
+
+    source_order = {"baseline": 0, "latent": 1, "metadata": 2}
+    method_order = {"none": 0, "concatenation": 1, "film": 2, "residual": 3}
+    strategy_order = {"scratch": 0, "finetune": 1}
+    table = table.assign(
+        _target=table["target"].map({"hc": 0, "sto2": 1}).fillna(9),
+        _source=table["feature_source"].map(source_order).fillna(9),
+        _method=table["fusion_method"].map(method_order).fillna(9),
+        _strategy=table["training_strategy"].map(strategy_order).fillna(9),
+    ).sort_values(["_target", "_source", "_method", "_strategy", "experiment"])
+    return table.drop(columns=["_target", "_source", "_method", "_strategy"]).reset_index(drop=True)
+
+
+def format_final_experiment_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Create a human-readable CSV without sacrificing the numeric master table."""
+    formatted = table[[
+        "target", "feature_source", "fusion_method", "training_strategy",
+        "experiment", "n_subjects",
+    ]].copy()
+    formatted["RMSE median [Q1, Q3]"] = table.apply(
+        lambda row: f"{row.rmse_median:.4g} [{row.rmse_q1:.4g}, {row.rmse_q3:.4g}]", axis=1
+    )
+    formatted["Bias median [Q1, Q3]"] = table.apply(
+        lambda row: f"{row.bias_median:.4g} [{row.bias_q1:.4g}, {row.bias_q3:.4g}]", axis=1
+    )
+    formatted["paired ΔRMSE median [Q1, Q3]"] = table.apply(
+        lambda row: "—" if pd.isna(row.delta_rmse_median) else
+        f"{row.delta_rmse_median:+.4g} [{row.delta_rmse_q1:+.4g}, {row.delta_rmse_q3:+.4g}]",
+        axis=1,
+    )
+    formatted["improved subjects (%)"] = table["improved_subjects_pct"].map(
+        lambda value: "—" if pd.isna(value) else f"{value:.1f}"
+    )
+    formatted["paired rank-biserial"] = table["paired_rank_biserial"].map(
+        lambda value: "—" if pd.isna(value) else f"{value:+.3f}"
+    )
+    formatted["Holm-adjusted p"] = table["wilcoxon_p_holm"].map(
+        lambda value: "—" if pd.isna(value) else f"{value:.3g}"
+    )
+    return formatted
 
 
 DIFFICULTY_ORDER = ("Q1", "Q2", "Q3", "Q4")
@@ -1135,7 +1341,7 @@ def plot_main_loso_comparison(
     dpi: int,
     save_pdf: bool,
 ) -> None:
-    """Create one two-row figure containing the complete LOSO comparison.
+    """Create one two-row figure for a matched representative comparison.
 
     Row 1: absolute held-out-subject RMSE for DRS only, Layer thickness,
     DTOF latent, and any additional experiments. Compact text reports each
@@ -1241,14 +1447,14 @@ def plot_main_loso_comparison(
                 ]
                 if row.empty:
                     continue
-                pvalue = float(row.iloc[0]["wilcoxon_RMSE_p"])
+                pvalue = float(row.iloc[0]["wilcoxon_RMSE_p_holm"])
                 pvalue_lines.append(f"{label}: {_format_pvalue(pvalue)}")
 
         if pvalue_lines:
             ax.text(
                 0.02,
                 0.98,
-                "Paired Wilcoxon vs DRS only\n" + "\n".join(pvalue_lines),
+                "Paired Wilcoxon vs DRS only (Holm)\n" + "\n".join(pvalue_lines),
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
@@ -1390,7 +1596,7 @@ def plot_main_loso_comparison(
     # )
     fig.subplots_adjust(top=0.97, bottom=0.09)
     fig.savefig(
-        output_dir / "main_loso_comparison.png",
+        output_dir / "representative_loso_comparison.png",
         dpi=dpi,
         bbox_inches="tight",
     )
@@ -1437,6 +1643,8 @@ def print_console_summary(
 
 def main() -> int:
     args = parse_args()
+    if args.expected_subjects <= 0:
+        raise ValueError("--expected-subjects must be positive.")
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1448,6 +1656,15 @@ def main() -> int:
             meta, tidy = load_experiment(spec)
         except Exception as exc:  # keep other completed experiments usable
             print(f"WARNING: skipped {spec.directory}: {exc}", file=sys.stderr)
+            continue
+        subject_count = int(tidy["subject_id"].nunique())
+        if subject_count != args.expected_subjects and not args.include_incomplete:
+            print(
+                f"WARNING: skipped incomplete run {spec.directory}: "
+                f"{subject_count}/{args.expected_subjects} subjects. "
+                "Use --include-incomplete only for diagnostics.",
+                file=sys.stderr,
+            )
             continue
         metas.append(meta)
         frames.append(tidy)
@@ -1488,6 +1705,16 @@ def main() -> int:
         paired_detail.to_csv(output_dir / "paired_fold_differences.csv", index=False)
     paired_summary.to_csv(output_dir / "paired_vs_baseline.csv", index=False)
 
+    final_table = build_final_experiment_table(all_results, paired_summary)
+    final_table.to_csv(
+        output_dir / "final_experiment_table.csv", index=False, encoding="utf-8-sig"
+    )
+    format_final_experiment_table(final_table).to_csv(
+        output_dir / "final_experiment_table_formatted.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
     relative = relative_metric_table(all_results, args.baseline_label)
     if not relative.empty:
         relative.to_csv(output_dir / "relative_metric_change.csv", index=False)
@@ -1502,8 +1729,29 @@ def main() -> int:
     apply_plot_style()
     save_pdf = False
     remove_legacy_figure_files(output_dir)
+    representative = all_results[
+        (all_results["training_mode"] == "baseline")
+        | (
+            (all_results["fusion_method"] == args.representative_method)
+            & (all_results["training_strategy"] == args.representative_strategy)
+            & (all_results["structure_control"] == "actual")
+        )
+    ].copy()
+    nonbaseline_sources = set(
+        representative.loc[
+            representative["training_mode"] != "baseline", "feature_source"
+        ]
+    )
+    missing_sources = {"latent", "metadata"} - nonbaseline_sources
+    if missing_sources:
+        print(
+            "WARNING: representative figure currently lacks completed source(s): "
+            + ", ".join(sorted(missing_sources))
+            + ". Re-run after those experiments finish.",
+            file=sys.stderr,
+        )
     plot_main_loso_comparison(
-        frame=all_results,
+        frame=representative,
         summary=summary,
         paired_detail=paired_detail,
         paired_summary=paired_summary,

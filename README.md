@@ -231,6 +231,7 @@ python -m jupyter lab
 ```
 
 Select the same environment as the notebook kernel, open a file under `notebooks/`, and choose **Run All**. The notebooks support a kernel working directory of either the root or `notebooks/` and locate the root with `pyproject.toml`.
+Notebooks 02–07 explicitly display their final summary table(s) and saved PNG figure(s) inline; the files are still written to `results/` for reproducible reuse.
 
 ### 01 — `01_stage1_retrieval.ipynb`
 
@@ -264,11 +265,12 @@ Select the same environment as the notebook kernel, open a file under `notebooks
 
 ### 05 — `05_stage2_fusion_comparison.ipynb`
 
-- **Purpose:** compare DRS-only, residual, and available FiLM experiments on matching folds.
-- **Reads:** directories in the notebook's `EXPERIMENTS` dictionary; baseline plus one fusion run is required.
-- **Computes:** paired ΔRMSE (fusion minus baseline), Wilcoxon tests, bootstrap intervals, and effects by baseline difficulty.
-- **Writes:** comparison PNGs and rebuildable tables under `results/tables/stage2/fusion_comparison/`; PDFs are disabled.
-- **Extend:** add more experiment-directory/label pairs to `EXPERIMENTS`.
+- **Purpose:** scan the full Stage 2 artifact tree and compare every completed configuration without mixing feature source, fusion method, or training strategy in the experiment label.
+- **Completeness:** runs with fewer than 154 unique LOSO subjects are warned about and excluded by default; `--include-incomplete` is intended only for diagnostics.
+- **Computes:** subject-level RMSE and signed bias median `[Q1, Q3]`; paired ΔRMSE median `[Q1, Q3]`; percentage of improved subjects; matched-pairs rank-biserial effect; paired Wilcoxon p-values with Holm adjustment; and effects by baseline difficulty.
+- **Writes:** numeric `final_experiment_table.csv`, thesis-readable `final_experiment_table_formatted.csv`, detailed rebuildable tables, and `representative_loso_comparison.png` under `results/tables/stage2/fusion_comparison/`.
+- **Representative figure:** defaults to residual + fine-tune and includes the DRS-only baseline plus every completed actual feature source under that matched setting. Change `REPRESENTATIVE_METHOD` and `REPRESENTATIVE_STRATEGY` in the notebook after all experiments finish.
+- **Display:** the formatted final table and representative PNG are shown inline after **Run All**.
 
 ### 06 — `06_stage2_subject_failure.ipynb`
 
