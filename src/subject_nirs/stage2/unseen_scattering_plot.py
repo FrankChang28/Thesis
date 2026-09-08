@@ -19,6 +19,7 @@ from scipy.stats import rankdata, wilcoxon
 
 
 COLORS = ("#4472C4", "#ED7D31", "#70AD47", "#A5A5A5")
+TARGET_DISPLAY = {"hc": "tHb", "sto2": "StO₂"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -208,13 +209,13 @@ def draw_panel(ax, detail, summary_rows, color, letter, unit, seed):
         median, low, high = (float(row[key]) for key in ("median_delta_RMSE", "median_ci_low", "median_ci_high"))
         ax.errorbar([position], [median], yerr=[[median-low], [high-median]], marker="D",
                     markersize=5.2, color="#111111", capsize=3, linewidth=1.2, zorder=5)
-        ax.text(position, .985, f"med {number(median)}\nworse {float(row['worsened_fraction']):.0%}\nHolm p{pvalue_text(float(row['holm_p']))}",
+        ax.text(position, .985, f"median {number(median)}\nworsened {float(row['worsened_fraction']):.0%}\n$p_{{\\mathrm{{Holm}}}}${pvalue_text(float(row['holm_p']))}",
                 transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=8,
                 bbox={"facecolor": "white", "edgecolor": "none", "alpha": .78, "pad": 1.2})
     ax.axhline(0, color="#555555", linestyle="--", linewidth=1.2)
     ax.set_title(f"{letter}  {label}", loc="left", fontweight="bold")
     ax.set_xticks(positions, [f"Set {condition}" for condition in conditions])
-    ax.set_xlabel("Unseen condition")
+    ax.set_xlabel("μs′ set")
     ax.set_ylabel(f"ΔRMSE (new − original) ({unit})")
     ax.grid(axis="y", color="#D7D7D7", linewidth=.7, alpha=.65)
     ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
@@ -238,7 +239,8 @@ def main():
     png_path, metadata_path = args.output_dir/f"{prefix}.png", args.output_dir/f"{prefix}_metadata.json"
     write_csv(detail_path, detail); write_csv(summary_path, summary)
     unit = args.unit or ("µM" if args.target == "hc" else "fraction")
-    title = args.title or f"{args.target.upper()} robustness on unseen validation datasets"
+    target_display = TARGET_DISPLAY.get(args.target.lower(), args.target)
+    title = args.title or f"DRS-only {target_display} robustness across μs′ validation sets"
     order = [str(item["key"]) for item in specs]
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 10.5, "pdf.fonttype": 42})
     fig, axes = plt.subplots(1, len(order), figsize=(6.3*len(order), 6), squeeze=False)

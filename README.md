@@ -81,7 +81,7 @@ data/
 └── NIRS_Absolute_Val_Dataset_diffwm.mat
 ```
 
-Both separate validation MAT files are used only by notebook 07. They are read directly in batches and do not require the old cache format. `NIRS_Absolute_Val_Dataset_new.mat` contains four unseen scattering-coefficient conditions; `NIRS_Absolute_Val_Dataset_diffwm.mat` contains three unseen white-matter conditions. Large files may be symlinked instead of copied:
+Both separate validation MAT files are used only by notebook 07. They are read directly in batches and do not require the old cache format. `NIRS_Absolute_Val_Dataset_new.mat` contains four newly simulated wavelength-dependent μs′ sets produced by changing K; `NIRS_Absolute_Val_Dataset_diffwm.mat` contains the three original Group 2 optical-property μs′ sets. Large files may be symlinked instead of copied:
 
 ```bash
 ln -s /external/path/dataset_dtof.mat data/raw/stage1/dataset_dtof.mat
@@ -267,21 +267,24 @@ Notebooks 02–07 explicitly display their final summary table(s) and saved PNG 
 
 - **Purpose:** scan the full Stage 2 artifact tree and compare every completed configuration without mixing feature source, fusion method, or training strategy in the experiment label.
 - **Completeness:** runs with fewer than 154 unique LOSO subjects are warned about and excluded by default; `--include-incomplete` is intended only for diagnostics.
-- **Computes:** subject-level RMSE and signed bias median `[Q1, Q3]`; paired ΔRMSE median `[Q1, Q3]`; percentage of improved subjects; matched-pairs rank-biserial effect; paired Wilcoxon p-values with Holm adjustment; and effects by baseline difficulty.
-- **Writes:** numeric `final_experiment_table.csv`, thesis-readable `final_experiment_table_formatted.csv`, detailed rebuildable tables, and `representative_loso_comparison.png` under `results/tables/stage2/fusion_comparison/`.
+- **Computes:** subject-level RMSE and signed bias median `[Q1, Q3]`; paired ΔRMSE median `[Q1, Q3]`; percentage of improved subjects; matched-pairs rank-biserial effect; paired Wilcoxon p-values with Holm adjustment; and effects by baseline difficulty. The Section 4.2.3 analysis assigns each target's DRS-only held-out subjects to Q1–Q4 once and reuses those groups across feature sources and training strategies.
+- **Writes:** numeric `final_experiment_table.csv`, thesis-readable `final_experiment_table_formatted.csv`, detailed rebuildable tables, `representative_loso_comparison.png`, and the fixed-method 2×2 `heterogeneous_benefit_<method>.png` plus its summary CSV under `results/tables/stage2/fusion_comparison/`.
 - **Representative figure:** defaults to residual + fine-tune and includes the DRS-only baseline plus every completed actual feature source under that matched setting. Change `REPRESENTATIVE_METHOD` and `REPRESENTATIVE_STRATEGY` in the notebook after all experiments finish.
-- **Display:** the formatted final table and representative PNG are shown inline after **Run All**.
+- **Heterogeneous-benefit figure:** rows compare scratch versus DRS-only-checkpoint fine-tuning; columns show tHb versus StO₂; each panel compares DTOF descriptor with layer thickness across common DRS-only difficulty quartiles. The final method is gated residual. While that matrix is incomplete, an optional whole-matrix concatenation fallback produces an explicitly labelled preview and never fills individual missing cells with another operator.
+- **Display:** the formatted final table, representative PNG, heterogeneous-benefit manifest/table, and four-panel PNG are shown inline after **Run All**.
 
 ### 06 — `06_stage2_subject_failure.ipynb`
 
-- **Purpose:** generate thesis subject-failure Figure 2.
-- **Reads:** HC baseline performance and Stage 2 validation cache.
-- **Computes:** intensity-balanced DRS signatures and contrasts for accurate, over-estimated, and under-estimated subjects.
-- **Writes:** a rebuildable signature NPZ under `cache/stage2/subject_failure/` and the final PNG under `results/figures/stage2/`.
+- **Purpose:** generate separate thesis-ready tHb and StO₂ figures for difficult-subject DRS spectral-shape analysis.
+- **Reads:** the tHb and StO₂ DRS-only baseline results plus the Stage 2 validation cache.
+- **Groups:** for each target separately, Q1 of held-out-subject DRS-only RMSE is the accurate reference; Q4 is the difficult group and is split into over- and under-estimation by the sign of DRS-only bias.
+- **Computes:** equal-target-weight subject DRS signatures, removes each subject's across-channel mean, and reports each difficult group's median relative-optical-density shape contrast standardized by the target-specific Q1 MAD.
+- **Writes:** a rebuildable signature NPZ under `cache/stage2/subject_failure/`; `subject_failure_hc.png` and `subject_failure_sto2.png` under `results/figures/stage2/`; and `subject_failure_summary.csv` under `results/tables/stage2/subject_failure/`.
+- **Display:** the summary table and both final PNGs are shown inline after **Run All**.
 
 ### 07 — `07_unseen_dataset_validation.ipynb`
 
-- **Purpose:** evaluate frozen baselines on the separate unseen-scattering and unseen-white-matter MAT files, then compare each condition with the same subject's RMSE on the original validation dataset.
+- **Purpose:** evaluate frozen DRS-only baselines on the four modified-K wavelength-dependent μs′ sets and the three original Group 2 optical-property μs′ sets, then compare each condition with the same subject's RMSE on the original validation dataset.
 - **Parameters:** `TARGET='hc'` or `'sto2'`; `FOLDS=None` for all; `DEVICE='auto'`, `'cpu'`, `'cuda'`, or e.g. `'cuda:1'`.
 - **Reads:** both separate validation MAT files, the target's baseline checkpoints, and the original `loso_results.csv`.
 - **Computes:** subject-level paired ΔRMSE (`new condition RMSE − original validation RMSE`), paired Wilcoxon tests, Holm-adjusted p-values, matched-pairs rank-biserial effects, and bootstrap confidence intervals for the median.

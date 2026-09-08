@@ -33,9 +33,11 @@ Outputs
 - experiment_summary.csv
 - paired_vs_baseline.csv
 - conditional_effect_by_baseline_difficulty.csv
+- heterogeneous_benefit_<method>.csv
 - final_experiment_table.csv
 - final_experiment_table_formatted.csv
 - representative_loso_comparison.png
+- heterogeneous_benefit_<method>.png (or an explicitly labelled preview fallback)
 
 The thesis table reports subject-level median [Q1, Q3] RMSE and bias, plus
 paired changes versus DRS only. The single figure is restricted to one matched
@@ -56,10 +58,11 @@ from typing import Iterable, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.patches import Patch
 
 
 TARGET_DISPLAY = {
-    "hc": "HC",
+    "hc": "tHb",
     "sto2": "StO₂",
 }
 
@@ -156,6 +159,25 @@ def parse_args() -> argparse.Namespace:
         default="finetune",
         choices=("finetune", "scratch"),
         help="Training strategy shown in the representative figure.",
+    )
+    parser.add_argument(
+        "--heterogeneity-method",
+        default="residual",
+        choices=("concatenation", "film", "residual"),
+        help=(
+            "Fixed fusion method used for the 2x2 subject-level heterogeneous-"
+            "benefit figure (default: residual)."
+        ),
+    )
+    parser.add_argument(
+        "--heterogeneity-fallback-method",
+        default=None,
+        choices=("concatenation", "film", "residual"),
+        help=(
+            "Optional whole-matrix preview fallback when --heterogeneity-method "
+            "is incomplete. The fallback is never mixed cell-by-cell with the "
+            "requested method and is labelled as a preview."
+        ),
     )
     return parser.parse_args()
 
@@ -959,6 +981,198 @@ def conditional_effect_by_baseline_difficulty(
 
     return pd.DataFrame(rows)
 
+
+HETEROGENEITY_TARGETS = ("hc", "sto2")
+HETEROGENEITY_SOURCES = ("latent", "metadata")
+HETEROGENEITY_STRATEGIES = ("scratch", "finetune")
+HETEROGENEITY_SOURCE_DISPLAY = {
+    "latent": "DTOF descriptor",
+    "metadata": "Layer thickness",
+}
+HETEROGENEITY_STRATEGY_DISPLAY = {
+    "scratch": "Scratch",
+    "finetune": "Fine-tuning",
+}
+FUSION_DISPLAY = {
+    "concatenation": "Concatenation",
+    "film": "FiLM",
+    "residual": "Gated residual",
+}
+
+
+def heterogeneous_benefit_missing_cells(
+    frame: pd.DataFrame,
+    fusion_method: str,
+) -> list[str]:
+    """Return missing cells for the fixed-method 2x2 heterogeneity figure."""
+    missing: list[str] = []
+    for target in HETEROGENEITY_TARGETS:
+        baseline_count = frame.loc[
+            (frame["target"] == target)
+            & (frame["training_mode"] == "baseline"),
+            "experiment",
+        ].nunique()
+        if baseline_count != 1:
+            missing.append(f"{target}/baseline")
+
+        for strategy in HETEROGENEITY_STRATEGIES:
+            for source in HETEROGENEITY_SOURCES:
+                count = frame.loc[
+                    (frame["target"] == target)
+                    & (frame["fusion_method"] == fusion_method)
+                    & (frame["training_strategy"] == strategy)
+                    & (frame["feature_source"] == source)
+                    & (frame["structure_control"] == "actual"),
+                    "experiment",
+                ].nunique()
+                if count == 0:
+                    missing.append(f"{target}/{strategy}/{source}")
+                elif count > 1:
+                    raise ValueError(
+                        "Multiple experiments occupy heterogeneity cell "
+                        f"{target}/{fusion_method}/{strategy}/{source}."
+                    )
+    return missing
+
+
+def resolve_heterogeneous_benefit_method(
+    frame: pd.DataFrame,
+    requested_method: str,
+    fallback_method: str | None = None,
+) -> tuple[str | None, bool, list[str]]:
+    """Choose one complete method matrix without mixing operators across cells."""
+    missing = heterogeneous_benefit_missing_cells(frame, requested_method)
+    if not missing:
+        return requested_method, False, []
+
+    if fallback_method is not None and fallback_method != requested_method:
+        fallback_missing = heterogeneous_benefit_missing_cells(frame, fallback_method)
+        if not fallback_missing:
+            return fallback_method, True, missing
+
+    return None, False, missing
+
+
+def build_heterogeneous_benefit_detail(
+    frame: pd.DataFrame,
+    paired_detail: pd.DataFrame,
+    fusion_method: str,
+) -> pd.DataFrame:
+    """Attach experiment factors and common DRS-only difficulty quartiles."""
+    missing = heterogeneous_benefit_missing_cells(frame, fusion_method)
+    if missing:
+        raise ValueError(
+            f"Incomplete {fusion_method} heterogeneity matrix: " + ", ".join(missing)
+        )
+
+    experiment_meta = (
+        frame.loc[
+            (frame["fusion_method"] == fusion_method)
+            & (frame["feature_source"].isin(HETEROGENEITY_SOURCES))
+            & (frame["training_strategy"].isin(HETEROGENEITY_STRATEGIES))
+            & (frame["structure_control"] == "actual"),
+            [
+                "target",
+                "experiment",
+                "feature_source",
+                "training_strategy",
+                "fusion_method",
+            ],
+        ]
+        .drop_duplicates()
+    )
+    detail = paired_detail.merge(
+        experiment_meta,
+        on=["target", "experiment"],
+        how="inner",
+        validate="many_to_one",
+    )
+
+    pieces: list[pd.DataFrame] = []
+    for target in HETEROGENEITY_TARGETS:
+        current = detail[detail["target"] == target].copy()
+        reference = (
+            current[["subject_id", "baseline_RMSE"]]
+            .drop_duplicates("subject_id")
+            .sort_values("subject_id")
+        )
+        if len(reference) < 4:
+            raise ValueError(f"Target {target} has fewer than four paired subjects.")
+        reference["difficulty_quartile"] = pd.qcut(
+            reference["baseline_RMSE"].rank(method="first"),
+            q=4,
+            labels=list(DIFFICULTY_ORDER),
+        ).astype(str)
+        current = current.merge(
+            reference[["subject_id", "difficulty_quartile"]],
+            on="subject_id",
+            how="inner",
+            validate="many_to_one",
+        )
+        pieces.append(current)
+
+    result = pd.concat(pieces, ignore_index=True)
+    return result.sort_values(
+        ["target", "training_strategy", "feature_source", "subject_id"]
+    ).reset_index(drop=True)
+
+
+def summarize_heterogeneous_benefit(detail: pd.DataFrame) -> pd.DataFrame:
+    """Summarize subject-level delta RMSE within each common difficulty quartile."""
+    rows: list[dict[str, object]] = []
+    grouped = detail.groupby(
+        [
+            "target",
+            "fusion_method",
+            "training_strategy",
+            "feature_source",
+            "difficulty_quartile",
+        ],
+        sort=False,
+        observed=True,
+    )
+    for keys, group in grouped:
+        target, method, strategy, source, quartile = keys
+        values = group["delta_RMSE"].dropna().to_numpy(dtype=float)
+        rows.append(
+            {
+                "target": target,
+                "fusion_method": method,
+                "training_strategy": strategy,
+                "feature_source": source,
+                "difficulty_quartile": quartile,
+                "n_subjects": int(values.size),
+                "delta_RMSE_median": float(np.median(values)),
+                "delta_RMSE_Q1": float(np.percentile(values, 25)),
+                "delta_RMSE_Q3": float(np.percentile(values, 75)),
+                "improved_subjects_pct": float(100.0 * np.mean(values < 0.0)),
+            }
+        )
+    summary = pd.DataFrame(rows)
+    summary["target"] = pd.Categorical(
+        summary["target"],
+        categories=list(HETEROGENEITY_TARGETS),
+        ordered=True,
+    )
+    summary["training_strategy"] = pd.Categorical(
+        summary["training_strategy"],
+        categories=list(HETEROGENEITY_STRATEGIES),
+        ordered=True,
+    )
+    summary["feature_source"] = pd.Categorical(
+        summary["feature_source"],
+        categories=list(HETEROGENEITY_SOURCES),
+        ordered=True,
+    )
+    summary["difficulty_quartile"] = pd.Categorical(
+        summary["difficulty_quartile"],
+        categories=list(DIFFICULTY_ORDER),
+        ordered=True,
+    )
+    return summary.sort_values(
+        ["target", "training_strategy", "feature_source", "difficulty_quartile"]
+    ).reset_index(drop=True)
+
 def apply_plot_style() -> None:
     plt.rcParams.update(
         {
@@ -999,6 +1213,153 @@ def create_axes_for_targets(targets: Sequence[str], height: float = 4.4):
 def save_figure(fig, output_dir: Path, stem: str, dpi: int, save_pdf: bool) -> None:
     fig.tight_layout()
     fig.savefig(output_dir / f"{stem}.png", dpi=dpi, bbox_inches="tight")
+
+
+def plot_heterogeneous_benefit(
+    detail: pd.DataFrame,
+    output_dir: Path,
+    fusion_method: str,
+    dpi: int,
+    *,
+    preview_for: str | None = None,
+) -> Path:
+    """Plot subject-level delta RMSE by DRS-only difficulty in a 2x2 layout."""
+    source_colors = {
+        "latent": "#3B82C4",
+        "metadata": "#E68A3F",
+    }
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(13.6, 8.4),
+        sharex=True,
+        sharey="col",
+        gridspec_kw={"hspace": 0.22, "wspace": 0.20},
+    )
+    base_x = np.arange(1, 5, dtype=float)
+    source_offsets = {"latent": -0.18, "metadata": 0.18}
+    panel_labels = iter("ABCD")
+
+    for row, strategy in enumerate(HETEROGENEITY_STRATEGIES):
+        for col, target in enumerate(HETEROGENEITY_TARGETS):
+            ax = axes[row, col]
+            panel = next(panel_labels)
+            subset = detail[
+                (detail["target"] == target)
+                & (detail["training_strategy"] == strategy)
+            ]
+
+            for source in HETEROGENEITY_SOURCES:
+                positions = base_x + source_offsets[source]
+                values = []
+                subject_ids = []
+                for quartile in DIFFICULTY_ORDER:
+                    current = subset[
+                        (subset["feature_source"] == source)
+                        & (subset["difficulty_quartile"] == quartile)
+                    ].sort_values("subject_id")
+                    values.append(current["delta_RMSE"].to_numpy(dtype=float))
+                    subject_ids.append(current["subject_id"].to_numpy(dtype=int))
+
+                bp = ax.boxplot(
+                    values,
+                    positions=positions,
+                    widths=0.28,
+                    whis=(5, 95),
+                    patch_artist=True,
+                    showfliers=False,
+                    manage_ticks=False,
+                    medianprops={"color": "black", "linewidth": 1.4},
+                    whiskerprops={"color": source_colors[source], "linewidth": 1.0},
+                    capprops={"color": source_colors[source], "linewidth": 1.0},
+                    boxprops={
+                        "facecolor": source_colors[source],
+                        "edgecolor": source_colors[source],
+                        "linewidth": 1.0,
+                        "alpha": 0.32,
+                    },
+                )
+                del bp
+
+                for position, current_values, current_ids in zip(
+                    positions, values, subject_ids
+                ):
+                    if current_values.size == 0:
+                        continue
+                    order = np.argsort(current_ids)
+                    ax.scatter(
+                        position + deterministic_jitter(len(current_values), width=0.075),
+                        current_values[order],
+                        s=12,
+                        alpha=0.30,
+                        color=source_colors[source],
+                        edgecolors="none",
+                        rasterized=True,
+                        zorder=2,
+                    )
+
+            ax.axhline(0.0, color="0.20", linewidth=1.1, linestyle="--", zorder=1)
+            ax.set_title(
+                f"{panel}  {HETEROGENEITY_STRATEGY_DISPLAY[strategy]} — "
+                f"{TARGET_DISPLAY[target]}",
+                loc="left",
+                fontweight="bold",
+            )
+            ax.set_xticks(base_x, [DIFFICULTY_DISPLAY[item] for item in DIFFICULTY_ORDER])
+            ax.set_xlim(0.55, 4.45)
+            unit = "μM" if target == "hc" else "fraction"
+            ax.set_ylabel(f"ΔRMSE (fusion − DRS-only; {unit})")
+            if row == 1:
+                ax.set_xlabel("DRS-only RMSE quartile")
+
+    handles = [
+        Patch(
+            facecolor=source_colors[source],
+            edgecolor=source_colors[source],
+            alpha=0.32,
+            label=HETEROGENEITY_SOURCE_DISPLAY[source],
+        )
+        for source in HETEROGENEITY_SOURCES
+    ]
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.955),
+        ncol=2,
+        frameon=False,
+    )
+    method_label = FUSION_DISPLAY.get(fusion_method, fusion_method.title())
+    if preview_for is None:
+        title = f"Subject-level heterogeneous benefit ({method_label})"
+        stem = f"heterogeneous_benefit_{fusion_method}"
+    else:
+        requested_label = FUSION_DISPLAY.get(preview_for, preview_for.title())
+        title = (
+            f"PREVIEW — {method_label} layout substitute "
+            f"({requested_label} matrix incomplete)"
+        )
+        stem = f"heterogeneous_benefit_{fusion_method}_preview_for_{preview_for}"
+    fig.suptitle(title, y=0.995, fontsize=14, fontweight="bold")
+    fig.text(
+        0.5,
+        0.012,
+        "Negative ΔRMSE indicates improvement. Q1–Q4 are defined once from "
+        "the held-out-subject DRS-only RMSE for each target.",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+    )
+    fig.subplots_adjust(
+        left=0.08,
+        right=0.98,
+        bottom=0.12,
+        top=0.84,
+        hspace=0.28,
+        wspace=0.20,
+    )
+    output_path = output_dir / f"{stem}.png"
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    return output_path
 
 
 def plot_box_metric(
@@ -1761,6 +2122,73 @@ def main() -> int:
         dpi=args.dpi,
         save_pdf=save_pdf,
     )
+
+    requested_method = args.heterogeneity_method
+    selected_method, is_preview, missing_cells = resolve_heterogeneous_benefit_method(
+        all_results,
+        requested_method=requested_method,
+        fallback_method=args.heterogeneity_fallback_method,
+    )
+    heterogeneity_manifest: dict[str, object] = {
+        "requested_method": requested_method,
+        "fallback_method": args.heterogeneity_fallback_method,
+        "selected_method": selected_method,
+        "is_preview": is_preview,
+        "requested_method_missing_cells": missing_cells,
+        "generated": False,
+    }
+    if selected_method is None:
+        print(
+            "WARNING: heterogeneous-benefit figure skipped; incomplete "
+            f"{requested_method} matrix: " + ", ".join(missing_cells),
+            file=sys.stderr,
+        )
+    else:
+        if is_preview:
+            print(
+                "WARNING: heterogeneous-benefit figure uses the complete "
+                f"{selected_method} matrix as an explicitly labelled preview; "
+                f"the requested {requested_method} matrix is incomplete.",
+                file=sys.stderr,
+            )
+        heterogeneity_detail = build_heterogeneous_benefit_detail(
+            all_results,
+            paired_detail,
+            fusion_method=selected_method,
+        )
+        heterogeneity_summary = summarize_heterogeneous_benefit(
+            heterogeneity_detail
+        )
+        preview_suffix = (
+            f"_preview_for_{requested_method}" if is_preview else ""
+        )
+        summary_path = output_dir / (
+            f"heterogeneous_benefit_{selected_method}{preview_suffix}.csv"
+        )
+        heterogeneity_summary.to_csv(
+            summary_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        image_path = plot_heterogeneous_benefit(
+            heterogeneity_detail,
+            output_dir=output_dir,
+            fusion_method=selected_method,
+            dpi=args.dpi,
+            preview_for=requested_method if is_preview else None,
+        )
+        heterogeneity_manifest.update(
+            {
+                "generated": True,
+                "image": image_path.name,
+                "summary": summary_path.name,
+            }
+        )
+
+    with (output_dir / "heterogeneous_benefit_manifest.json").open(
+        "w", encoding="utf-8"
+    ) as handle:
+        json.dump(heterogeneity_manifest, handle, indent=2, ensure_ascii=False)
 
     print_console_summary(summary, paired_summary, conditional)
     print(f"\nSaved analysis to: {output_dir}")
