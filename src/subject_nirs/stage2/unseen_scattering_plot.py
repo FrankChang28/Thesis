@@ -17,9 +17,19 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from scipy.stats import rankdata, wilcoxon
 
+from .display import (
+    BASELINE_DISPLAY,
+    target_display,
+    target_display_scale,
+    target_error_unit,
+)
+
 
 COLORS = ("#4472C4", "#ED7D31", "#70AD47", "#A5A5A5")
-TARGET_DISPLAY = {"hc": "tHb", "sto2": "StO₂"}
+CONDITION_LABELS = {
+    "unseen_scattering": ("MK-1", "MK-2", "MK-3", "MK-4"),
+    "unseen_wm": ("G2-1", "G2-2", "G2-3"),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -116,12 +126,25 @@ def bootstrap_median_ci(values, samples, rng):
 
 
 def rank_biserial(values):
+    """Return paired rank-biserial effect; positive values mean improvement."""
     nonzero = values[values != 0]
     if not nonzero.size:
         return 0.0
     ranks = rankdata(np.abs(nonzero), method="average")
-    positive, negative = ranks[nonzero > 0].sum(), ranks[nonzero < 0].sum()
-    return float((positive - negative) / (positive + negative))
+    improvement = ranks[nonzero < 0].sum()
+    worsening = ranks[nonzero > 0].sum()
+    return float((improvement - worsening) / (improvement + worsening))
+
+
+def scale_detail_for_display(detail, target):
+    """Convert native target errors to thesis display units."""
+    scale = target_display_scale(target)
+    if scale == 1.0:
+        return detail
+    for row in detail:
+        for key in ("original_RMSE", "new_RMSE", "delta_RMSE"):
+            row[key] = float(row[key]) * scale
+    return detail
 
 
 def holm_adjust(pvalues):
@@ -179,16 +202,28 @@ def atomic_json(path, payload):
     os.replace(temporary, path)
 
 
+def condition_tick_labels(dataset_key, conditions):
+    labels = CONDITION_LABELS.get(dataset_key)
+    if labels is None:
+        return [f"Set {condition}" for condition in conditions]
+    if len(labels) != len(conditions):
+        raise ValueError(
+            f"{dataset_key} has {len(conditions)} conditions but {len(labels)} labels"
+        )
+    return list(labels)
+
+
 def number(value):
     return f"{value:+.4f}" if abs(value) < .01 else f"{value:+.2f}"
 
 
 def pvalue_text(value):
-    return "<.001" if value < .001 else f"={value:.3f}".replace("0.", ".")
+    return "< 0.001" if value < .001 else f"= {value:.3f}"
 
 
 def draw_panel(ax, detail, summary_rows, color, letter, unit, seed):
     label = str(detail[0]["dataset_label"])
+    dataset_key = str(detail[0]["dataset_key"])
     conditions = sorted({int(row["condition"]) for row in detail})
     values = [np.asarray([float(row["delta_RMSE"]) for row in detail if int(row["condition"]) == c]) for c in conditions]
     positions = np.arange(1, len(conditions) + 1, dtype=float)
@@ -209,14 +244,14 @@ def draw_panel(ax, detail, summary_rows, color, letter, unit, seed):
         median, low, high = (float(row[key]) for key in ("median_delta_RMSE", "median_ci_low", "median_ci_high"))
         ax.errorbar([position], [median], yerr=[[median-low], [high-median]], marker="D",
                     markersize=5.2, color="#111111", capsize=3, linewidth=1.2, zorder=5)
-        ax.text(position, .985, f"median {number(median)}\nworsened {float(row['worsened_fraction']):.0%}\n$p_{{\\mathrm{{Holm}}}}${pvalue_text(float(row['holm_p']))}",
+        ax.text(position, .985, f"Median {number(median)}\nWorsened {float(row['worsened_fraction']):.0%}\n$p_{{\\mathrm{{Holm}}}}$ {pvalue_text(float(row['holm_p']))}",
                 transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=8,
                 bbox={"facecolor": "white", "edgecolor": "none", "alpha": .78, "pad": 1.2})
     ax.axhline(0, color="#555555", linestyle="--", linewidth=1.2)
     ax.set_title(f"{letter}  {label}", loc="left", fontweight="bold")
-    ax.set_xticks(positions, [f"Set {condition}" for condition in conditions])
-    ax.set_xlabel("μs′ set")
-    ax.set_ylabel(f"ΔRMSE (new − original) ({unit})")
+    ax.set_xticks(positions, condition_tick_labels(dataset_key, conditions))
+    ax.set_xlabel("Scattering condition")
+    ax.set_ylabel(f"ΔRMSE ({unit})")
     ax.grid(axis="y", color="#D7D7D7", linewidth=.7, alpha=.65)
     ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
 
@@ -232,15 +267,16 @@ def main():
             raise ValueError("EXPECTED_CONDITIONS must be positive")
         detail.extend(paired_deltas(path, original, key, label, expected))
         specs.append({"key": key, "label": label, "expected_conditions": expected, "csv": str(path.resolve())})
+    detail = scale_detail_for_display(detail, args.target)
     summary = summarize(detail, args.bootstrap_samples, args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     prefix = args.output_prefix or f"fig_unseen_dataset_validation_{args.target}_delta_rmse"
     detail_path, summary_path = args.output_dir/f"{prefix}_paired_detail.csv", args.output_dir/f"{prefix}_summary.csv"
     png_path, metadata_path = args.output_dir/f"{prefix}.png", args.output_dir/f"{prefix}_metadata.json"
     write_csv(detail_path, detail); write_csv(summary_path, summary)
-    unit = args.unit or ("µM" if args.target == "hc" else "fraction")
-    target_display = TARGET_DISPLAY.get(args.target.lower(), args.target)
-    title = args.title or f"DRS-only {target_display} robustness across μs′ validation sets"
+    unit = args.unit or target_error_unit(args.target)
+    target_name = target_display(args.target)
+    title = args.title or f"{BASELINE_DISPLAY} {target_name} robustness under unseen scattering conditions"
     order = [str(item["key"]) for item in specs]
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 10.5, "pdf.fonttype": 42})
     fig, axes = plt.subplots(1, len(order), figsize=(6.3*len(order), 6), squeeze=False)
@@ -250,8 +286,7 @@ def main():
         current_summary = [row for row in summary if row["dataset_key"] == key]
         draw_panel(ax, current, current_summary, COLORS[index % len(COLORS)], chr(65+index), unit, args.seed+index)
         ax.set_ylim(-bound, bound)
-    fig.suptitle(title, fontsize=13.5, fontweight="bold", y=.98)
-    fig.subplots_adjust(left=.075, right=.985, top=.88, bottom=.17, wspace=.22)
+    fig.subplots_adjust(left=.075, right=.985, top=.94, bottom=.17, wspace=.22)
     fig.legend(handles=[
         Patch(facecolor="#777", edgecolor="#777", alpha=.22, label="Density"),
         Patch(facecolor="white", edgecolor="#555", label="IQR (whiskers: 5th–95th)"),
@@ -266,7 +301,8 @@ def main():
         "paired_unit": "held-out LOSO subject/fold", "original_csv": str(args.original_csv.resolve()),
         "target": args.target, "unit": unit, "datasets": specs,
         "multiple_comparison": "Holm adjustment across all unseen conditions in this target figure",
-        "effect_size": "matched-pairs rank-biserial correlation; positive means worse on unseen data",
+        "effect_size": "matched-pairs rank-biserial correlation; positive means improvement relative to the original validation reference",
+        "display_scale": target_display_scale(args.target),
         "bootstrap_samples": args.bootstrap_samples, "seed": args.seed,
         "num_original_folds": len(original), "png": str(png_path.resolve()),
         "paired_detail_csv": str(detail_path.resolve()), "summary_csv": str(summary_path.resolve()),

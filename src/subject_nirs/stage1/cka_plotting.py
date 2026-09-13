@@ -12,8 +12,25 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
+
+
+PARAMETER_DISPLAY = {
+    "mu_a_scalp": "Scalp μₐ (cm⁻¹)",
+    "mu_a_skull": "Skull μₐ (cm⁻¹)",
+    "mu_a_gm": "GM μₐ (cm⁻¹)",
+    "mu_s_scalp": "Scalp μs′ (cm⁻¹)",
+    "mu_s_skull": "Skull μs′ (cm⁻¹)",
+    "mu_s_gm": "GM μs′ (cm⁻¹)",
+}
+
+
+def parameter_display(parameter: str) -> str:
+    """Return a thesis-facing optical-parameter label."""
+
+    return PARAMETER_DISPLAY.get(parameter, parameter)
 
 
 def _save(fig: plt.Figure, output_dir: Path, stem: str, metadata: dict[str, str]) -> None:
@@ -81,7 +98,8 @@ def plot_full_heatmap(output_dir: Path, vmin: float, vmax: float) -> None:
 def plot_transitions(output_dir: Path) -> None:
     frame = pd.read_csv(output_dir / "op_transition_summary.csv")
     families = [("absorption", "A  Absorption coefficients"), ("scattering", "B  Scattering coefficients")]
-    fig, axes = plt.subplots(1, 2, figsize=(15.5, 9.0), sharex=True, constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(15.5, 9.0), sharex=True)
+    fig.subplots_adjust(left=0.17, right=0.98, bottom=0.13, top=0.87, wspace=0.40)
     xmin = float((frame["mean_cka"] - frame["fold_sd"]).min())
     xmax = float((frame["mean_cka"] + frame["fold_sd"]).max())
     padding = max(0.02, 0.08 * (xmax - xmin))
@@ -103,7 +121,10 @@ def plot_transitions(output_dir: Path) -> None:
                 capsize=3,
                 linewidth=1.4,
             )
-        labels = [f"{row.parameter}: {row.transition}" for row in subset.itertuples()]
+        labels = [
+            f"{parameter_display(row.parameter)}: {row.transition}"
+            for row in subset.itertuples()
+        ]
         ax.set_yticks(y, labels)
         ax.set_title(title, loc="left", fontweight="bold")
         ax.grid(axis="x", color="0.88", linewidth=0.7)
@@ -113,6 +134,16 @@ def plot_transitions(output_dir: Path) -> None:
         "Controlled one-parameter OP transitions\n"
         "Points: mean across folds; error bars: descriptive SD of fold-level group means",
         fontsize=14,
+    )
+    fig.legend(
+        handles=[
+            Line2D([], [], marker="o", linestyle="none", color=colors[False], label="Adjacent levels"),
+            Line2D([], [], marker="D", linestyle="none", color=colors[True], label="Full-range comparison"),
+        ],
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.012),
+        ncol=2,
+        frameon=False,
     )
     _save(
         fig,
@@ -154,10 +185,10 @@ def plot_conditional(output_dir: Path) -> None:
         y_rows = subset.sort_values("y_level_index").drop_duplicates("y_level_index")
         ax.set_xticks(np.arange(len(x_rows)), [f"{value:g}" for value in x_rows["x_value"]])
         ax.set_yticks(np.arange(len(y_rows)), [f"{value:g}" for value in y_rows["y_value"]])
-        ax.set_xlabel(axis_x)
-        ax.set_ylabel(axis_y)
+        ax.set_xlabel(parameter_display(axis_x))
+        ax.set_ylabel(parameter_display(axis_y))
         suffix = " (endpoint)" if bool(transition.is_endpoint) else ""
-        ax.set_title(f"{target}: {transition.transition}{suffix}")
+        ax.set_title(f"{parameter_display(target)}: {transition.transition}{suffix}")
         for row_position in range(pivot.shape[0]):
             for column_position in range(pivot.shape[1]):
                 value = pivot.iloc[row_position, column_position]
@@ -175,7 +206,7 @@ def plot_conditional(output_dir: Path) -> None:
     colorbar = fig.colorbar(image, cax=colorbar_axis)
     colorbar.set_label("Mean debiased linear CKA")
     fig.suptitle(
-        f"Conditional sensitivity of {target}\n"
+        f"Conditional sensitivity of {parameter_display(target)}\n"
         "Each cell averages all remaining OP combinations (including absorption combinations) and all folds",
         fontsize=13,
     )

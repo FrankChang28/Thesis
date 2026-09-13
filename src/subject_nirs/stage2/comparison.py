@@ -20,11 +20,11 @@ You can also specify experiments explicitly and override display labels:
 
 python -m subject_nirs.stage2.comparison \
     --experiment ./artifacts/stage2/baseline/hc \
-    --experiment "./artifacts/stage2/concatenation/finetune/metadata/hc=Layer thickness" \
-    --experiment "./artifacts/stage2/residual/finetune/dtof/hc=DTOF latent" \
+    --experiment "./artifacts/stage2/concatenation/finetune/metadata/hc=Tissue-thickness feature" \
+    --experiment "./artifacts/stage2/residual/finetune/dtof/hc=DTOF descriptor" \
     --experiment ./artifacts/stage2/baseline/sto2 \
-    --experiment "./artifacts/stage2/concatenation/finetune/metadata/sto2=Layer thickness" \
-    --experiment "./artifacts/stage2/residual/finetune/dtof/sto2=DTOF latent" \
+    --experiment "./artifacts/stage2/concatenation/finetune/metadata/sto2=Tissue-thickness feature" \
+    --experiment "./artifacts/stage2/residual/finetune/dtof/sto2=DTOF descriptor" \
     --output-dir ./comparison
 
 Outputs
@@ -40,7 +40,7 @@ Outputs
 - heterogeneous_benefit_<method>.png (or an explicitly labelled preview fallback)
 
 The thesis table reports subject-level median [Q1, Q3] RMSE and bias, plus
-paired changes versus DRS only. The single figure is restricted to one matched
+paired changes versus the DRS-only baseline. The single figure is restricted to one matched
 fusion/training setting (residual + fine-tune by default), so feature-source
 effects are not confounded with the fusion operator.
 """
@@ -60,11 +60,15 @@ import numpy as np
 import pandas as pd
 from matplotlib.patches import Patch
 
-
-TARGET_DISPLAY = {
-    "hc": "tHb",
-    "sto2": "StO₂",
-}
+from .display import (
+    BASELINE_DISPLAY,
+    FEATURE_DISPLAY,
+    FUSION_DISPLAY,
+    STRATEGY_DISPLAY,
+    TARGET_DISPLAY,
+    target_display_scale,
+    target_error_unit,
+)
 
 METRICS = ("RMSE", "MAE", "Bias", "AbsBias", "ErrorStd")
 
@@ -118,7 +122,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--baseline-label",
-        default="DRS only",
+        default=BASELINE_DISPLAY,
         help="Exact display label used as the paired-comparison baseline.",
     )
     parser.add_argument(
@@ -391,25 +395,14 @@ def default_label(
     training_strategy: str,
 ) -> str:
     if training_mode == "baseline" or source == "baseline":
-        return "DRS only"
+        return BASELINE_DISPLAY
 
-    source_names = {
-        "metadata": "Layer thickness",
-        "latent": "DTOF latent",
-        "subject feature": "Subject feature",
-    }
-    label = source_names.get(source, source.replace("_", " ").title())
+    label = FEATURE_DISPLAY.get(source, source.replace("_", " ").title())
 
     if control not in {"", "actual", "none", "nan"}:
         label = f"{label} ({control})"
-    method_names = {
-        "concatenation": "Concatenation",
-        "film": "FiLM",
-        "residual": "Residual",
-    }
-    strategy_names = {"finetune": "Fine-tune", "scratch": "Scratch"}
-    method = method_names.get(fusion_method, fusion_method.title())
-    strategy = strategy_names.get(training_strategy, training_strategy.title())
+    method = FUSION_DISPLAY.get(fusion_method, fusion_method.title())
+    strategy = STRATEGY_DISPLAY.get(training_strategy, training_strategy.title())
     return f"{label} | {method} | {strategy}"
 
 
@@ -489,6 +482,14 @@ def load_experiment(spec: ExperimentSpec) -> tuple[ExperimentMeta, pd.DataFrame]
         col = metric_column(frame, target_name, metric)
         tidy[metric] = pd.to_numeric(frame[col], errors="coerce")
 
+    # Keep model artifacts in native units, but make every analysis/table/plot
+    # emitted by this reporting module thesis-facing. StO₂ errors are therefore
+    # expressed on the percentage scale (%) instead of as fractions.
+    display_scale = target_display_scale(target_mode)
+    if display_scale != 1.0:
+        tidy.loc[:, list(METRICS)] = tidy.loc[:, list(METRICS)] * display_scale
+    tidy["error_unit"] = target_error_unit(target_mode)
+
     tidy = tidy.dropna(subset=["subject_id", "RMSE", "MAE", "Bias"]).copy()
     tidy["subject_id"] = tidy["subject_id"].astype(int)
     tidy["AbsBias"] = tidy["AbsBias"].fillna(tidy["Bias"].abs())
@@ -509,7 +510,7 @@ def load_experiment(spec: ExperimentSpec) -> tuple[ExperimentMeta, pd.DataFrame]
 
 def label_sort_key(label: str) -> tuple[int, str]:
     text = label.lower()
-    if text in {"baseline", "drs only", "drs-only"}:
+    if text in {"baseline", "drs only", "drs-only", "drs-only baseline"}:
         priority = 0
     elif "metadata" in text or "hand" in text:
         priority = 1
@@ -779,6 +780,17 @@ def format_final_experiment_table(table: pd.DataFrame) -> pd.DataFrame:
         "target", "feature_source", "fusion_method", "training_strategy",
         "experiment", "n_subjects",
     ]].copy()
+    formatted["target"] = formatted["target"].map(TARGET_DISPLAY)
+    formatted["feature_source"] = formatted["feature_source"].map(
+        lambda value: FEATURE_DISPLAY.get(value, value)
+    )
+    formatted["fusion_method"] = formatted["fusion_method"].map(
+        lambda value: FUSION_DISPLAY.get(value, value)
+    )
+    formatted["training_strategy"] = formatted["training_strategy"].map(
+        lambda value: STRATEGY_DISPLAY.get(value, value)
+    )
+    formatted["error unit"] = table["target"].map(target_error_unit)
     formatted["RMSE median [Q1, Q3]"] = table.apply(
         lambda row: f"{row.rmse_median:.4g} [{row.rmse_q1:.4g}, {row.rmse_q3:.4g}]", axis=1
     )
@@ -874,7 +886,8 @@ def conditional_effect_by_baseline_difficulty(
 
     For each target, Q1--Q4 are defined once from the baseline RMSE of every
     available subject, then reused for all non-baseline experiments. This makes
-    Layer thickness and DTOF latent directly comparable in the same panel.
+    the tissue-thickness feature and DTOF descriptor directly comparable in
+    the same panel.
 
     The quartiles remain descriptive because they use held-out-subject DRS-only
     test RMSE. They demonstrate effect heterogeneity, not a deployable selector.
@@ -986,17 +999,12 @@ HETEROGENEITY_TARGETS = ("hc", "sto2")
 HETEROGENEITY_SOURCES = ("latent", "metadata")
 HETEROGENEITY_STRATEGIES = ("scratch", "finetune")
 HETEROGENEITY_SOURCE_DISPLAY = {
-    "latent": "DTOF descriptor",
-    "metadata": "Layer thickness",
+    "latent": FEATURE_DISPLAY["latent"],
+    "metadata": FEATURE_DISPLAY["metadata"],
 }
 HETEROGENEITY_STRATEGY_DISPLAY = {
-    "scratch": "Scratch",
-    "finetune": "Fine-tuning",
-}
-FUSION_DISPLAY = {
-    "concatenation": "Concatenation",
-    "film": "FiLM",
-    "residual": "Gated residual",
+    "scratch": STRATEGY_DISPLAY["scratch"],
+    "finetune": STRATEGY_DISPLAY["finetune"],
 }
 
 
@@ -1307,10 +1315,9 @@ def plot_heterogeneous_benefit(
             )
             ax.set_xticks(base_x, [DIFFICULTY_DISPLAY[item] for item in DIFFICULTY_ORDER])
             ax.set_xlim(0.55, 4.45)
-            unit = "μM" if target == "hc" else "fraction"
-            ax.set_ylabel(f"ΔRMSE (fusion − DRS-only; {unit})")
+            ax.set_ylabel(f"ΔRMSE ({target_error_unit(target)})")
             if row == 1:
-                ax.set_xlabel("DRS-only RMSE quartile")
+                ax.set_xlabel("Baseline RMSE quartile")
 
     handles = [
         Patch(
@@ -1324,14 +1331,14 @@ def plot_heterogeneous_benefit(
     fig.legend(
         handles=handles,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.955),
+        bbox_to_anchor=(0.5, 0.985),
         ncol=2,
         frameon=False,
     )
     method_label = FUSION_DISPLAY.get(fusion_method, fusion_method.title())
     if preview_for is None:
-        title = f"Subject-level heterogeneous benefit ({method_label})"
         stem = f"heterogeneous_benefit_{fusion_method}"
+        figure_top = 0.90
     else:
         requested_label = FUSION_DISPLAY.get(preview_for, preview_for.title())
         title = (
@@ -1339,12 +1346,13 @@ def plot_heterogeneous_benefit(
             f"({requested_label} matrix incomplete)"
         )
         stem = f"heterogeneous_benefit_{fusion_method}_preview_for_{preview_for}"
-    fig.suptitle(title, y=0.995, fontsize=14, fontweight="bold")
+        fig.suptitle(title, y=0.995, fontsize=14, fontweight="bold")
+        figure_top = 0.84
     fig.text(
         0.5,
         0.012,
         "Negative ΔRMSE indicates improvement. Q1–Q4 are defined once from "
-        "the held-out-subject DRS-only RMSE for each target.",
+        "the held-out-subject baseline RMSE for each target.",
         ha="center",
         va="bottom",
         fontsize=9,
@@ -1353,7 +1361,7 @@ def plot_heterogeneous_benefit(
         left=0.08,
         right=0.98,
         bottom=0.12,
-        top=0.84,
+        top=figure_top,
         hspace=0.28,
         wspace=0.20,
     )
@@ -1486,11 +1494,11 @@ def plot_delta_rmse(
 
         ax.axhline(0.0, color="black", linewidth=1.1, linestyle="--")
         ax.set_title(TARGET_DISPLAY[target])
-        ax.set_ylabel("Paired RMSE difference\n(model − DRS only)")
+        ax.set_ylabel(f"ΔRMSE ({target_error_unit(target)})")
         ax.set_xticks(positions, labels, rotation=18, ha="right")
         ax.set_xlim(0.45, len(labels) + 0.55)
 
-    fig.suptitle("Paired subject-level RMSE difference from DRS only", y=1.02, fontsize=14)
+    fig.suptitle("Paired subject-level RMSE change from baseline", y=1.02, fontsize=14)
     save_figure(fig, output_dir, "02_delta_rmse_vs_baseline", dpi, save_pdf)
 
 
@@ -1505,6 +1513,19 @@ def plot_rmse_vs_absbias(
     labels_all = experiment_order(frame)
     colors = color_map(labels_all)
     markers = ["o", "s", "^", "D", "P", "X", "v", "<", ">"]
+    contexts = frame.loc[
+        frame["training_mode"] != "baseline",
+        ["fusion_method", "training_strategy"],
+    ].drop_duplicates()
+    if len(contexts) == 1:
+        context = contexts.iloc[0]
+        fig.suptitle(
+            f"{FUSION_DISPLAY.get(context['fusion_method'], context['fusion_method'])} fusion · "
+            f"{STRATEGY_DISPLAY.get(context['training_strategy'], context['training_strategy'])}",
+            fontsize=12,
+            fontweight="bold",
+            y=0.995,
+        )
     marker_map = {label: markers[i % len(markers)] for i, label in enumerate(labels_all)}
 
     for ax, target in zip(axes, targets):
@@ -1627,7 +1648,7 @@ def plot_relative_metric_change(
         np.arange(len(row_keys)),
         [f"{TARGET_DISPLAY[target]} — {experiment}" for target, experiment in row_keys],
     )
-    ax.set_title("Median paired change relative to DRS only")
+    ax.set_title("Median paired change relative to baseline")
 
     for i in range(matrix.shape[0]):
         for j in range(matrix.shape[1]):
@@ -1704,14 +1725,16 @@ def plot_main_loso_comparison(
 ) -> None:
     """Create one two-row figure for a matched representative comparison.
 
-    Row 1: absolute held-out-subject RMSE for DRS only, Layer thickness,
-    DTOF latent, and any additional experiments. Compact text reports each
-    experiment's paired Wilcoxon p-value versus DRS only; the separate
+    Row 1: absolute held-out-subject RMSE for the DRS-only baseline,
+    tissue-thickness feature, DTOF descriptor, and any additional experiments.
+    Compact text reports each experiment's paired Wilcoxon p-value versus the
+    baseline; the separate
     paired-difference boxplot is omitted.
 
-    Row 2: conditional paired RMSE differences across common DRS-only-RMSE
+    Row 2: conditional paired RMSE differences across common baseline-RMSE
     quartiles. All experiments use the same Q1--Q4 subject assignment within a
-    target, so Layer thickness and DTOF latent can be compared directly.
+        target, so the tissue-thickness feature and DTOF descriptor can be
+        compared directly.
     """
     del summary, paired_detail
 
@@ -1723,11 +1746,11 @@ def plot_main_loso_comparison(
     fig, axes = plt.subplots(
         2,
         n_targets,
-        figsize=(6.8 * n_targets, 8.0),
+        figsize=(6.8 * n_targets, 9.2),
         squeeze=False,
         gridspec_kw={
             "height_ratios": [1.02, 1.18],
-            "hspace": 0.34,
+            "hspace": 0.58,
             "wspace": 0.25,
         },
     )
@@ -1809,13 +1832,15 @@ def plot_main_loso_comparison(
                 if row.empty:
                     continue
                 pvalue = float(row.iloc[0]["wilcoxon_RMSE_p_holm"])
-                pvalue_lines.append(f"{label}: {_format_pvalue(pvalue)}")
+                pvalue_lines.append(
+                    f"{label.split(' | ')[0]}: {_format_pvalue(pvalue)}"
+                )
 
         if pvalue_lines:
             ax.text(
                 0.02,
                 0.98,
-                "Paired Wilcoxon vs DRS only (Holm)\n" + "\n".join(pvalue_lines),
+                "Paired Wilcoxon vs baseline (Holm)\n" + "\n".join(pvalue_lines),
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
@@ -1829,8 +1854,14 @@ def plot_main_loso_comparison(
             )
 
         ax.set_title(f"{TARGET_DISPLAY[target]} prediction performance", fontweight="bold")
-        ax.set_ylabel("Held-out-subject RMSE")
-        ax.set_xticks(positions, labels, rotation=14, ha="right")
+        ax.set_ylabel(f"RMSE ({target_error_unit(target)})")
+        compact_labels = []
+        for label in labels:
+            if label == baseline:
+                compact_labels.append(BASELINE_DISPLAY)
+                continue
+            compact_labels.append(label.split(" | ")[0])
+        ax.set_xticks(positions, compact_labels, rotation=0, ha="center", fontsize=8.2)
         ax.set_xlim(0.45, len(labels) + 0.55)
 
         # ---- Row 2: conditional effect by baseline difficulty ----
@@ -1886,22 +1917,27 @@ def plot_main_loso_comparison(
                 markersize=6.4,
                 linewidth=1.7,
                 capsize=3.2,
-                label=label,
+                label=label.split(" | ")[0],
                 zorder=4,
             )
 
-            # Q1 and Q4 win rates communicate the selective value without
-            # crowding all four quartiles with text.
-            for quartile_index in (0, 3):
+            # Report only the hardest-quartile win rate; Q1 annotations add
+            # clutter without changing the heterogeneous-benefit conclusion.
+            for quartile_index in (3,):
                 mean_value = means[quartile_index]
                 win_rate = win_rates[quartile_index]
                 if not np.isfinite(mean_value) or not np.isfinite(win_rate):
                     continue
                 vertical_offset = 9 if mean_value <= 0 else -11
+                horizontal_offset = (
+                    (-18 if index == 0 else 18)
+                    if len(conditional_labels) == 2
+                    else 0
+                )
                 ax.annotate(
                     f"Improved: {win_rate:.0%}",
                     (x[quartile_index], mean_value),
-                    xytext=(0, vertical_offset),
+                    xytext=(horizontal_offset, vertical_offset),
                     textcoords="offset points",
                     ha="center",
                     va="bottom" if mean_value <= 0 else "top",
@@ -1921,8 +1957,8 @@ def plot_main_loso_comparison(
             f"{TARGET_DISPLAY[target]}: feature effect by baseline difficulty",
             fontweight="bold",
         )
-        ax.set_xlabel("DRS-only RMSE quartile (Q1 easiest → Q4 hardest)")
-        ax.set_ylabel(r"$\Delta$RMSE (Conditioned − Baseline)")
+        ax.set_xlabel("Baseline RMSE quartile (Q1 easiest → Q4 hardest)")
+        ax.set_ylabel(f"ΔRMSE ({target_error_unit(target)})")
         ax.set_xticks(
             base_x,
             [DIFFICULTY_DISPLAY[item] for item in DIFFICULTY_ORDER],
@@ -1955,7 +1991,18 @@ def plot_main_loso_comparison(
     #     va="bottom",
     #     fontsize=8.5,
     # )
-    fig.subplots_adjust(top=0.97, bottom=0.09)
+    comparison_rows = frame[frame["feature_source"].isin(HETEROGENEITY_SOURCES)]
+    fusion_methods = comparison_rows["fusion_method"].dropna().unique()
+    training_strategies = comparison_rows["training_strategy"].dropna().unique()
+    if len(fusion_methods) == 1 and len(training_strategies) == 1:
+        fig.suptitle(
+            f"{FUSION_DISPLAY.get(fusion_methods[0], fusion_methods[0])} fusion · "
+            f"{STRATEGY_DISPLAY.get(training_strategies[0], training_strategies[0])}",
+            fontsize=12,
+            fontweight="bold",
+            y=0.995,
+        )
+    fig.subplots_adjust(top=0.92, bottom=0.09)
     fig.savefig(
         output_dir / "representative_loso_comparison.png",
         dpi=dpi,
@@ -1978,7 +2025,7 @@ def print_console_summary(
         )
 
     if not paired.empty:
-        print("\nPaired comparison vs DRS only:")
+        print("\nPaired comparison vs baseline:")
         for _, row in paired.iterrows():
             pvalue = row["wilcoxon_RMSE_p"]
             ptext = "NA" if not np.isfinite(pvalue) else f"{pvalue:.3g}"

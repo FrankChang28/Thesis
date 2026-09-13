@@ -55,10 +55,16 @@ def unit_rows(values: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     return values / np.maximum(norms, eps)
 
 
-def spherical_subject_features(
+def select_nearest_to_spherical_center(
     embeddings: np.ndarray,
     subject_ids: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Select one observed embedding nearest each subject's spherical center.
+
+    The returned descriptor is an actual acquisition embedding.  The spherical
+    center is used only as the selection reference and is not returned as the
+    descriptor.
+    """
     subjects = np.sort(np.unique(subject_ids))
     unit = unit_rows(np.asarray(embeddings, dtype=np.float32))
     features = []
@@ -75,6 +81,14 @@ def spherical_subject_features(
         features.append(z[idx])
 
     return subjects.astype(np.int64), np.asarray(features, dtype=np.float32)
+
+
+def spherical_subject_features(
+    embeddings: np.ndarray,
+    subject_ids: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Backward-compatible alias for nearest-to-spherical-center selection."""
+    return select_nearest_to_spherical_center(embeddings, subject_ids)
 
 
 def standardize_from_train(

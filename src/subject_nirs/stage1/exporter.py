@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Extract one raw DTOF latent vector per subject for Abs_prediction.
+"""Extract one raw DTOF descriptor per subject for Stage 2 prediction.
 
 The generated NPZ is compatible with ``load_dtof_bank()`` when:
 
     CFG.structure_feature_key = "latent_raw"
 
-This version uses ``DTOFSubjectEncoder`` and spherical subject aggregation.
-The saved ``latent_raw`` has not been z-score normalized. Abs_prediction
+For each subject, this version selects the observed acquisition embedding
+nearest the spherical center of that subject's DTOF representations.  The
+saved ``latent_raw`` has not been z-score normalized. Stage 2
 should perform fold-specific normalization using only the training subjects
 of each prediction fold.
 """
@@ -27,7 +28,7 @@ from .model import DTOFSubjectEncoder
 from .training import resolve_device
 from .utils import (
     set_seed,
-    spherical_subject_features,
+    select_nearest_to_spherical_center,
     standardize_from_train,
 )
 
@@ -35,8 +36,8 @@ from .utils import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Extract one raw spherical DTOF subject-level latent vector "
-            "per subject for Abs_prediction"
+            "Extract one raw nearest-to-center DTOF descriptor per subject "
+            "for Stage 2 prediction"
         )
     )
     parser.add_argument("--checkpoint", type=str, required=True)
@@ -301,7 +302,7 @@ def main(args: argparse.Namespace) -> None:
             "collect_embeddings() must return 'z' and 'subject_ids'"
         )
 
-    subject_ids, latent_raw = spherical_subject_features(
+    subject_ids, latent_raw = select_nearest_to_spherical_center(
         payload["z"],
         payload["subject_ids"],
     )
@@ -362,8 +363,13 @@ def main(args: argparse.Namespace) -> None:
     save_payload: dict[str, np.ndarray] = {
         # Main feature consumed by Abs_prediction.
         # "Raw" means it has not received checkpoint-train z-score
-        # normalization. Its subject aggregation is spherical_mean.
+        # normalization. It is an observed acquisition embedding selected by
+        # proximity to the subject's spherical center.
         "latent_raw": latent_raw,
+
+        # Canonical alias for new consumers. ``latent_raw`` remains for
+        # compatibility with existing Stage 2 configurations.
+        "dtof_descriptor_raw": latent_raw,
 
         # Alias retained for compatibility and easier inspection.
         "raw_features": latent_raw,
@@ -381,7 +387,7 @@ def main(args: argparse.Namespace) -> None:
         "splits": splits,
         "op_positions": positions,
 
-        "aggregation": np.asarray("spherical_mean"),
+        "aggregation": np.asarray("nearest_to_spherical_center"),
         "feature_key": np.asarray("latent_raw"),
         "source_checkpoint": np.asarray(
             str(checkpoint_path)
@@ -482,7 +488,7 @@ def main(args: argparse.Namespace) -> None:
     print("Saved Abs_prediction-compatible subject features")
     print(f"  path: {save_path}")
     print(f"  latent_raw shape: {latent_raw.shape}")
-    print(f"  aggregation: spherical_mean")
+    print("  aggregation: nearest_to_spherical_center")
     print(
         f"  subject IDs: "
         f"{subject_ids[0]}..{subject_ids[-1]}"

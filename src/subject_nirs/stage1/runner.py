@@ -20,7 +20,7 @@ from .utils import (
     save_history_csv,
     save_json,
     set_seed,
-    spherical_subject_features,
+    select_nearest_to_spherical_center,
     standardize_from_train,
 )
 from .visualization import (
@@ -154,7 +154,7 @@ def main() -> None:
     all_ids = np.concatenate(
         [payloads[name]["subject_ids"] for name in ("train", "val", "test")]
     )
-    subject_ids, raw_features = spherical_subject_features(all_z, all_ids)
+    subject_ids, raw_features = select_nearest_to_spherical_center(all_z, all_ids)
 
     splits = np.full(len(subject_ids), "unknown", dtype="U8")
     splits[np.isin(subject_ids, bundle.split.train_subjects)] = "train"
@@ -167,13 +167,14 @@ def main() -> None:
         output_dir / "subject_features_eval_grid.npz",
         features=features,
         latent_raw=raw_features,
+        dtof_descriptor_raw=raw_features,
         subject_ids=subject_ids,
         matlab_subject_ids=subject_ids + 1,
         splits=splits,
         normalization_mean=mean,
         normalization_std=std,
         op_positions=eval_positions,
-        aggregation=np.asarray("spherical_mean"),
+        aggregation=np.asarray("nearest_to_spherical_center"),
     )
 
     if args.save_csv:

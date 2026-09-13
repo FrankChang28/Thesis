@@ -26,11 +26,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from .display import (
+    target_display,
+    target_display_scale,
+    target_error_unit,
+    target_value_unit,
+)
+
 
 TARGET_ORDER = ("HC", "StO2")
 TARGET_LABELS = {
-    "HC": r"tHb",
-    "StO2": r"StO$_2$",
+    "HC": target_display("HC"),
+    "StO2": target_display("StO2"),
 }
 TARGET_COLORS = {
     "HC": "#2878B5",
@@ -187,49 +194,25 @@ def load_target_predictions(spec: TargetInput) -> pd.DataFrame:
 
 
 def compute_subject_metrics(predictions: pd.DataFrame) -> pd.DataFrame:
-    """Calculate metrics separately for each independent LOSO subject.
-
-    NRMSE uses one common reference SD per prediction task.  The reference SD
-    gives every subject equal total weight, regardless of how many repeated
-    observations that subject contributes.  It is intentionally not calculated
-    from each subject's own SD, which can be unstable when a subject spans only
-    a narrow target range.
-    """
-    target_scales: dict[str, float] = {}
-    for target, target_frame in predictions.groupby("target", sort=False):
-        subject_means = target_frame.groupby("subject_id")["y_true"].mean()
-        subject_balanced_mean = float(subject_means.mean())
-        subject_mean_squared_deviations = target_frame.groupby("subject_id")[
-            "y_true"
-        ].apply(
-            lambda values: float(
-                np.mean(np.square(values.to_numpy(dtype=float) - subject_balanced_mean))
-            )
-        )
-        scale = float(np.sqrt(subject_mean_squared_deviations.mean()))
-        if not np.isfinite(scale) or scale <= 0:
-            raise ValueError(
-                f"{target}: subject-balanced reference SD must be positive; got {scale}."
-            )
-        target_scales[str(target)] = scale
-
+    """Calculate RMSE, MAE, bias, and R² per independent LOSO subject."""
     rows: list[dict[str, float | int | str]] = []
     for (target, subject_id), group in predictions.groupby(
         ["target", "subject_id"], sort=False
     ):
         error = group["error"].to_numpy(dtype=float)
+        truth = group["y_true"].to_numpy(dtype=float)
         rmse = float(np.sqrt(np.mean(np.square(error))))
-        target_scale = target_scales[str(target)]
+        ss_res = float(np.sum(np.square(error)))
+        ss_tot = float(np.sum(np.square(truth - np.mean(truth))))
         rows.append(
             {
                 "target": target,
                 "subject_id": int(subject_id),
                 "n_samples": int(error.size),
-                "reference_SD_subject_balanced": target_scale,
                 "RMSE": rmse,
-                "NRMSE_percent": rmse / target_scale * 100.0,
                 "MAE": float(np.mean(np.abs(error))),
                 "Bias": float(np.mean(error)),
+                "R2": np.nan if ss_tot == 0 else 1.0 - ss_res / ss_tot,
             }
         )
     return pd.DataFrame(rows)
@@ -254,21 +237,18 @@ def summarize_metrics(
             "target": target,
             "n_subjects": int(subjects["subject_id"].nunique()),
             "n_samples": int(len(pred)),
-            "reference_SD_subject_balanced": float(
-                subjects["reference_SD_subject_balanced"].iloc[0]
-            ),
             "pooled_RMSE_secondary": float(np.sqrt(np.mean(np.square(error)))),
             "pooled_MAE_secondary": float(np.mean(np.abs(error))),
             "pooled_Bias_secondary": float(np.mean(error)),
             "pooled_R2_secondary": np.nan if ss_tot == 0 else 1.0 - ss_res / ss_tot,
         }
-        for metric in ("RMSE", "NRMSE_percent", "MAE", "Bias"):
+        for metric in ("RMSE", "MAE", "Bias", "R2"):
             values = subjects[metric].to_numpy(dtype=float)
-            row[f"subject_{metric}_median"] = float(np.median(values))
-            row[f"subject_{metric}_Q1"] = float(np.percentile(values, 25))
-            row[f"subject_{metric}_Q3"] = float(np.percentile(values, 75))
-            row[f"subject_{metric}_mean"] = float(np.mean(values))
-            row[f"subject_{metric}_SD"] = float(np.std(values, ddof=1))
+            row[f"subject_{metric}_median"] = float(np.nanmedian(values))
+            row[f"subject_{metric}_Q1"] = float(np.nanpercentile(values, 25))
+            row[f"subject_{metric}_Q3"] = float(np.nanpercentile(values, 75))
+            row[f"subject_{metric}_mean"] = float(np.nanmean(values))
+            row[f"subject_{metric}_SD"] = float(np.nanstd(values, ddof=1))
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -363,10 +343,13 @@ def plot_calibration(
         frame = calibration[calibration["target"] == target].sort_values("bin")
         stats = summary[summary["target"] == target].iloc[0]
         color = TARGET_COLORS[target]
-        x = frame["truth_median"].to_numpy(dtype=float)
-        y = frame["prediction_median"].to_numpy(dtype=float)
-        q1 = frame["prediction_Q1"].to_numpy(dtype=float)
-        q3 = frame["prediction_Q3"].to_numpy(dtype=float)
+        display_scale = target_display_scale(target)
+        value_unit = target_value_unit(target)
+        error_unit = target_error_unit(target)
+        x = frame["truth_median"].to_numpy(dtype=float) * display_scale
+        y = frame["prediction_median"].to_numpy(dtype=float) * display_scale
+        q1 = frame["prediction_Q1"].to_numpy(dtype=float) * display_scale
+        q3 = frame["prediction_Q3"].to_numpy(dtype=float) * display_scale
 
         plot_low = min(float(x.min()), float(q1.min()))
         plot_high = max(float(x.max()), float(q3.max()))
@@ -382,27 +365,25 @@ def plot_calibration(
             marker="o",
             markersize=4.5,
             linewidth=2.0,
-            label="Subject-balanced median",
+            label="Median across subjects",
         )
         ax.set_xlim(limits)
         ax.set_ylim(limits)
         ax.set_aspect("equal", adjustable="box")
-        ax.set_xlabel(f"True {TARGET_LABELS[target]}")
-        ax.set_ylabel(f"Predicted {TARGET_LABELS[target]}")
+        ax.set_xlabel(f"True {TARGET_LABELS[target]} ({value_unit})")
+        ax.set_ylabel(f"Predicted {TARGET_LABELS[target]} ({value_unit})")
         ax.set_title(f"({chr(97 + panel)}) {TARGET_LABELS[target]}", loc="left")
         ax.text(
             0.04,
             0.96,
-            "Subjects = {n}\nSubject RMSE = {median:.3f} "
-            "[{q1:.3f}, {q3:.3f}]\nSubject nRMSE = {nmedian:.1f}% "
-            "[{nq1:.1f}%, {nq3:.1f}%]".format(
+            "Subjects = {n}\nRMSE ({unit}) = {median:.3f} "
+            "[{q1:.3f}, {q3:.3f}]\nR² = {r2median:.3f}".format(
                 n=int(stats["n_subjects"]),
-                median=stats["subject_RMSE_median"],
-                q1=stats["subject_RMSE_Q1"],
-                q3=stats["subject_RMSE_Q3"],
-                nmedian=stats["subject_NRMSE_percent_median"],
-                nq1=stats["subject_NRMSE_percent_Q1"],
-                nq3=stats["subject_NRMSE_percent_Q3"],
+                unit=error_unit,
+                median=stats["subject_RMSE_median"] * display_scale,
+                q1=stats["subject_RMSE_Q1"] * display_scale,
+                q3=stats["subject_RMSE_Q3"] * display_scale,
+                r2median=stats["subject_R2_median"],
             ),
             transform=ax.transAxes,
             va="top",
@@ -465,12 +446,20 @@ def plot_subject_distributions(
 
         for row, metric in enumerate(("RMSE", "Bias")):
             ax = axes[row, col]
-            _violin_box_points(ax, frame[metric], 1.0, color, rng)
+            display_scale = target_display_scale(target)
+            error_unit = target_error_unit(target)
+            _violin_box_points(
+                ax,
+                frame[metric].to_numpy(dtype=float) * display_scale,
+                1.0,
+                color,
+                rng,
+            )
             if metric == "Bias":
                 ax.axhline(0.0, color="0.35", linestyle="--", linewidth=1.0)
             ax.set_xlim(0.52, 1.48)
             ax.set_xticks([1.0], [TARGET_LABELS[target]])
-            ax.set_ylabel(f"Subject-level {metric}")
+            ax.set_ylabel(f"Subject-level {metric} ({error_unit})")
             panel = chr(97 + row * 2 + col)
             ax.set_title(f"({panel}) {TARGET_LABELS[target]} {metric}", loc="left")
             ax.text(
@@ -479,17 +468,15 @@ def plot_subject_distributions(
                 (
                     "Median [IQR]\n{median:.3f} [{q1:.3f}, {q3:.3f}]"
                     + (
-                        "\nnRMSE: {nmedian:.1f}% [{nq1:.1f}%, {nq3:.1f}%]"
+                        "\nR²: {r2median:.3f}"
                         if metric == "RMSE"
                         else ""
                     )
                 ).format(
-                    median=stats[f"subject_{metric}_median"],
-                    q1=stats[f"subject_{metric}_Q1"],
-                    q3=stats[f"subject_{metric}_Q3"],
-                    nmedian=stats["subject_NRMSE_percent_median"],
-                    nq1=stats["subject_NRMSE_percent_Q1"],
-                    nq3=stats["subject_NRMSE_percent_Q3"],
+                    median=stats[f"subject_{metric}_median"] * display_scale,
+                    q1=stats[f"subject_{metric}_Q1"] * display_scale,
+                    q3=stats[f"subject_{metric}_Q3"] * display_scale,
+                    r2median=stats["subject_R2_median"],
                 ),
                 transform=ax.transAxes,
                 va="top",

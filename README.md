@@ -117,7 +117,7 @@ python scripts/export_subject_features.py \
   --amp
 ```
 
-The checkpoint fold, directory number, and exported feature fold must match. The exported `latent_raw` array is the default Stage 2 feature.
+The checkpoint fold, directory number, and exported feature fold must match. The exported `latent_raw` array is the default Stage 2 feature. It is the observed DTOF acquisition embedding nearest that subject's spherical center; the center itself is not exported as the descriptor. New exports also provide the descriptive alias `dtof_descriptor_raw`.
 
 ### 3.3 Run all 154 folds
 
@@ -181,8 +181,8 @@ FiLM is retained as a comparison; residual is the main model. The complete Stage
 Fusion artifacts mirror the same factors under
 `artifacts/stage2/<fusion_method>/<finetune|scratch>/<dtof|metadata>/<hc|sto2>/`.
 
-For every LOSO fold, both DTOF descriptors and the four layer-thickness
-metadata features are standardized with z-score statistics fitted only on that
+For every LOSO fold, both DTOF descriptors and the four tissue-thickness
+features are standardized with z-score statistics fitted only on that
 fold's training subjects. Validation and held-out test subjects use those same
 training-fold statistics without clipping.
 
@@ -258,7 +258,7 @@ Notebooks 02–07 explicitly display their final summary table(s) and saved PNG 
 
 ### 04 — `04_stage2_baseline_evaluation.ipynb`
 
-- **Purpose:** evaluate DRS-only HC and StO₂ baselines.
+- **Purpose:** evaluate the tHb and StO₂ DRS-only baselines.
 - **Reads:** both baseline directories, `loso_results.csv`, and prediction NPZ files.
 - **Computes:** subject-level calibration, RMSE, MAE, and signed bias.
 - **Writes:** tables under `results/tables/stage2/baseline/` and final baseline PNGs.
@@ -267,27 +267,27 @@ Notebooks 02–07 explicitly display their final summary table(s) and saved PNG 
 
 - **Purpose:** scan the full Stage 2 artifact tree and compare every completed configuration without mixing feature source, fusion method, or training strategy in the experiment label.
 - **Completeness:** runs with fewer than 154 unique LOSO subjects are warned about and excluded by default; `--include-incomplete` is intended only for diagnostics.
-- **Computes:** subject-level RMSE and signed bias median `[Q1, Q3]`; paired ΔRMSE median `[Q1, Q3]`; percentage of improved subjects; matched-pairs rank-biserial effect; paired Wilcoxon p-values with Holm adjustment; and effects by baseline difficulty. The Section 4.2.3 analysis assigns each target's DRS-only held-out subjects to Q1–Q4 once and reuses those groups across feature sources and training strategies.
+- **Computes:** subject-level RMSE and signed bias median `[Q1, Q3]`; paired ΔRMSE median `[Q1, Q3]`; percentage of improved subjects; matched-pairs rank-biserial effect (positive means improvement); paired Wilcoxon p-values with Holm adjustment; and effects by baseline difficulty. The Section 4.2.3 analysis assigns each target's baseline held-out subjects to Q1–Q4 once and reuses those groups across feature sources and training strategies. Thesis-facing StO₂ errors are reported on the percentage scale (`%`; native fractions multiplied by 100).
 - **Writes:** numeric `final_experiment_table.csv`, thesis-readable `final_experiment_table_formatted.csv`, detailed rebuildable tables, `representative_loso_comparison.png`, and the fixed-method 2×2 `heterogeneous_benefit_<method>.png` plus its summary CSV under `results/tables/stage2/fusion_comparison/`.
-- **Representative figure:** defaults to residual + fine-tune and includes the DRS-only baseline plus every completed actual feature source under that matched setting. Change `REPRESENTATIVE_METHOD` and `REPRESENTATIVE_STRATEGY` in the notebook after all experiments finish.
-- **Heterogeneous-benefit figure:** rows compare scratch versus DRS-only-checkpoint fine-tuning; columns show tHb versus StO₂; each panel compares DTOF descriptor with layer thickness across common DRS-only difficulty quartiles. The final method is gated residual. While that matrix is incomplete, an optional whole-matrix concatenation fallback produces an explicitly labelled preview and never fills individual missing cells with another operator.
+- **Representative figure:** defaults to Gated residual + Fine-tuning and includes the DRS-only baseline plus every completed actual feature source under that matched setting. Change `REPRESENTATIVE_METHOD` and `REPRESENTATIVE_STRATEGY` in the notebook after all experiments finish.
+- **Heterogeneous-benefit figure:** rows compare Scratch versus DRS-only-checkpoint Fine-tuning; columns show tHb versus StO₂; each panel compares the DTOF descriptor with the tissue-thickness feature across common baseline difficulty quartiles. The final method is Gated residual. While that matrix is incomplete, an optional whole-matrix Concatenation fallback produces an explicitly labelled preview and never fills individual missing cells with another operator.
 - **Display:** the formatted final table, representative PNG, heterogeneous-benefit manifest/table, and four-panel PNG are shown inline after **Run All**.
 
 ### 06 — `06_stage2_subject_failure.ipynb`
 
-- **Purpose:** generate separate thesis-ready tHb and StO₂ figures for difficult-subject DRS spectral-shape analysis.
-- **Reads:** the tHb and StO₂ DRS-only baseline results plus the Stage 2 validation cache.
-- **Groups:** for each target separately, Q1 of held-out-subject DRS-only RMSE is the accurate reference; Q4 is the difficult group and is split into over- and under-estimation by the sign of DRS-only bias.
-- **Computes:** equal-target-weight subject DRS signatures, removes each subject's across-channel mean, and reports each difficult group's median relative-optical-density shape contrast standardized by the target-specific Q1 MAD.
-- **Writes:** a rebuildable signature NPZ under `cache/stage2/subject_failure/`; `subject_failure_hc.png` and `subject_failure_sto2.png` under `results/figures/stage2/`; and `subject_failure_summary.csv` under `results/tables/stage2/subject_failure/`.
-- **Display:** the summary table and both final PNGs are shown inline after **Run All**.
+- **Purpose:** generate target-specific baseline figures, the original 2 × 2 DTOF comparison, and shared-scale 3 × 2 comparisons across the DRS-only baseline, DTOF descriptor, and tissue-thickness feature.
+- **Reads:** the complete tHb and StO₂ baseline, Gated residual + Fine-tuning + DTOF descriptor, and Gated residual + Fine-tuning + tissue-thickness LOSO results plus the Stage 2 validation cache.
+- **Groups:** each model independently defines Q1 and Q4 from its own held-out-subject RMSE and splits Q4 into over- and under-estimation by its own signed Bias.
+- **Computes:** equal-target-weight subject DRS signatures and subject-wise mean-centered spectral shapes. The comparison figure expresses all model rows relative to the baseline Q1 channel-wise median and MAD and uses one symmetric color scale; color differences therefore reflect changed model-specific difficult-group membership, not altered DRS measurements. A cell marker indicates that the difficult-group channel-wise IQR remains entirely on one side of the Q1 median.
+- **Writes:** the original `subject_failure_hc.png` and `subject_failure_sto2.png`; the DTOF-only `subject_failure_comparison_<target>.png`; the three-model `subject_failure_feature_comparison_<target>.png`; plus rebuildable summary CSVs under `results/tables/stage2/subject_failure/`.
+- **Display:** all three summary tables and all target-specific baseline/comparison PNGs are shown inline after **Run All**.
 
 ### 07 — `07_unseen_dataset_validation.ipynb`
 
-- **Purpose:** evaluate frozen DRS-only baselines on the four modified-K wavelength-dependent μs′ sets and the three original Group 2 optical-property μs′ sets, then compare each condition with the same subject's RMSE on the original validation dataset.
+- **Purpose:** evaluate frozen DRS-only baselines on four modified-K wavelength-dependent μs′ sets and three conditions that keep the original Group 2 scalp/skull/gray-matter μs′ fixed while changing the WM/GM μs′ multiplier, then compare each condition with the same subject's RMSE on the original validation dataset.
 - **Parameters:** `TARGET='hc'` or `'sto2'`; `FOLDS=None` for all; `DEVICE='auto'`, `'cpu'`, `'cuda'`, or e.g. `'cuda:1'`.
 - **Reads:** both separate validation MAT files, the target's baseline checkpoints, and the original `loso_results.csv`.
-- **Computes:** subject-level paired ΔRMSE (`new condition RMSE − original validation RMSE`), paired Wilcoxon tests, Holm-adjusted p-values, matched-pairs rank-biserial effects, and bootstrap confidence intervals for the median.
+- **Computes:** subject-level paired ΔRMSE (`new condition RMSE − original validation RMSE`), paired Wilcoxon tests, Holm-adjusted p-values, matched-pairs rank-biserial effects (positive means improvement), and bootstrap confidence intervals for the median. Thesis-facing StO₂ errors are reported on the percentage scale (`%`; native fractions multiplied by 100).
 - **Writes:** resumable inference metrics under `artifacts/stage2/unseen_dataset_validation/<dataset>/<target>/`; paired detail/summary tables, metadata, and a two-panel PNG under `results/figures/stage2/unseen_dataset_validation/`.
 - **Display:** the final PNG and statistical summary table are also shown inline by the notebook.
 - **Resume:** completed fold JSONs are reused. `FOLDS='1,3,10-20'` runs a subset, although the paired final plot requires the same complete fold set as the original results. Predictions are off by default.

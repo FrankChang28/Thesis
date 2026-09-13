@@ -8,13 +8,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from .display import BASELINE_DISPLAY, target_display, target_display_scale, target_error_unit
+
 NUM_WAVELENGTHS = 5
 NUM_SDS = 6
 WAVELENGTHS_NM = (660, 730, 810, 850, 940)
 SDS_LABELS = tuple(f"SDS{index}" for index in range(1, NUM_SDS + 1))
 TARGET_INFO = {
-    "hc": {"column": "GM_hc", "display": "tHb", "unit": "μM"},
-    "sto2": {"column": "GM_StO2", "display": "StO₂", "unit": "fraction"},
+    "hc": {"column": "GM_hc", "display": target_display("hc")},
+    "sto2": {"column": "GM_StO2", "display": target_display("sto2")},
 }
 
 
@@ -76,7 +78,12 @@ def compute_subject_signatures(
     y_path: str | Path,
     subject_id_path: str | Path,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute an equal-target-weight mean 30-channel DRS signature per subject."""
+    """Compute one pooled mean 30-channel DRS signature per subject.
+
+    The current validation design contributes the same number of rows for
+    every tHb–StO₂ target pair.  This is checked explicitly, making the pooled
+    mean algebraically identical to the former equal-target-weight mean.
+    """
     x = np.load(x_path, mmap_mode="r")
     y = np.load(y_path, mmap_mode="r")
     subject_ids = np.load(subject_id_path, mmap_mode="r")
@@ -91,12 +98,13 @@ def compute_subject_signatures(
         mask = np.asarray(subject_ids == subject_id)
         subject_x = np.asarray(x[mask], dtype=np.float64)
         subject_y = np.asarray(y[mask, :2], dtype=np.float64)
-        target_pairs = np.unique(subject_y, axis=0)
-        cell_means = [
-            subject_x[np.all(np.isclose(subject_y, pair), axis=1)].mean(axis=0)
-            for pair in target_pairs
-        ]
-        signatures.append(np.mean(cell_means, axis=0))
+        _, target_pair_counts = np.unique(subject_y, axis=0, return_counts=True)
+        if np.unique(target_pair_counts).size != 1:
+            raise ValueError(
+                f"Subject {subject_id} has unequal row counts across target pairs; "
+                "a pooled mean would not equal the target-balanced mean."
+            )
+        signatures.append(subject_x.mean(axis=0))
     return unique_subjects, np.asarray(signatures, dtype=np.float32)
 
 
@@ -181,6 +189,264 @@ def compute_failure_contrasts(
     return contrasts, summary
 
 
+def _compute_model_specific_failure_contrasts(
+    performance_by_model: dict[str, pd.DataFrame],
+    signature_subject_ids: np.ndarray,
+    signatures: np.ndarray,
+) -> tuple[
+    dict[str, dict[str, np.ndarray]],
+    dict[str, dict[str, int | float | str]],
+]:
+    """Compare model-specific difficult groups on one DRS-only reference scale.
+
+    Each model defines its own Q1/Q4 and signed-bias groups. All rows are then
+    expressed relative to the baseline Q1 median and MAD, so color magnitude is
+    directly comparable across models. The DRS spectra themselves are fixed;
+    only the subjects selected by each model can differ.
+    """
+    if "drs_only" not in performance_by_model:
+        raise KeyError("performance_by_model must contain a 'drs_only' reference.")
+    if len(performance_by_model) < 2:
+        raise ValueError("At least two models are required for a comparison.")
+    required_columns = {"subject_id", "baseline_rmse", "baseline_bias"}
+    for name, performance in performance_by_model.items():
+        missing_columns = required_columns - set(performance.columns)
+        if missing_columns:
+            raise KeyError(f"Missing {name} performance columns: {sorted(missing_columns)}")
+    if signatures.ndim != 2 or signatures.shape[1] != NUM_WAVELENGTHS * NUM_SDS:
+        raise ValueError(f"Expected signatures [N, 30], got {signatures.shape}.")
+    if len(signature_subject_ids) != len(signatures):
+        raise ValueError("Signature IDs and signatures have incompatible lengths.")
+
+    signature_index = {int(sid): index for index, sid in enumerate(signature_subject_ids)}
+    common_subject_set = set(signature_index)
+    for performance in performance_by_model.values():
+        common_subject_set &= set(performance.subject_id.astype(int))
+    common_subjects = sorted(common_subject_set)
+    if len(common_subjects) < 4:
+        raise ValueError("At least four common subjects are required.")
+
+    def align(performance: pd.DataFrame) -> pd.DataFrame:
+        return (
+            performance.drop_duplicates("subject_id", keep="last")
+            .assign(subject_id=lambda frame: frame.subject_id.astype(int))
+            .set_index("subject_id")
+            .loc[common_subjects]
+            .reset_index()
+        )
+
+    frames = {
+        model_name: align(performance)
+        for model_name, performance in performance_by_model.items()
+    }
+    fixed_od = np.vstack([signatures[signature_index[sid]] for sid in common_subjects])
+    fixed_shape = fixed_od - fixed_od.mean(axis=1, keepdims=True)
+
+    masks: dict[str, dict[str, np.ndarray]] = {}
+    summaries: dict[str, dict[str, int | float | str]] = {}
+    for model_name, frame in frames.items():
+        q25, q75 = frame.baseline_rmse.quantile([0.25, 0.75])
+        accurate = frame.baseline_rmse.to_numpy() <= q25
+        difficult = frame.baseline_rmse.to_numpy() >= q75
+        model_masks = {
+            "accurate": accurate,
+            "difficult": difficult,
+            "overestimation": difficult & (frame.baseline_bias.to_numpy() > 0),
+            "underestimation": difficult & (frame.baseline_bias.to_numpy() < 0),
+        }
+        empty_groups = [
+            name
+            for name in ("overestimation", "underestimation")
+            if not np.any(model_masks[name])
+        ]
+        if empty_groups:
+            raise ValueError(f"{model_name} difficult bias groups are empty: {empty_groups}")
+        masks[model_name] = model_masks
+        summaries[model_name] = {
+            "model": model_name,
+            "common_n": int(len(common_subjects)),
+            "accurate_n": int(accurate.sum()),
+            "difficult_n": int(difficult.sum()),
+            "overestimation_n": int(model_masks["overestimation"].sum()),
+            "underestimation_n": int(model_masks["underestimation"].sum()),
+            "zero_bias_difficult_n": int(
+                np.sum(difficult & np.isclose(frame.baseline_bias.to_numpy(), 0.0))
+            ),
+            "rmse_q25": float(q25),
+            "rmse_q75": float(q75),
+        }
+
+    reference_mask = masks["drs_only"]["accurate"]
+    reference_center = np.median(fixed_shape[reference_mask], axis=0)
+    mad = 1.4826 * np.median(
+        np.abs(fixed_shape[reference_mask] - reference_center), axis=0
+    )
+    positive = mad[np.isfinite(mad) & (mad > 1e-12)]
+    reference_scale = np.maximum(
+        mad,
+        np.percentile(positive, 10) if len(positive) else 1.0,
+    )
+    contrasts = {
+        model_name: {
+            group_name: (
+                (np.median(fixed_shape[model_masks[group_name]], axis=0) - reference_center)
+                / reference_scale
+            ).reshape(NUM_WAVELENGTHS, NUM_SDS)
+            for group_name in ("overestimation", "underestimation")
+        }
+        for model_name, model_masks in masks.items()
+    }
+    reference_difficult = masks["drs_only"]["difficult"]
+    for model_name, summary in summaries.items():
+        summary["difficult_overlap_n"] = int(
+            np.sum(reference_difficult & masks[model_name]["difficult"])
+        )
+        summary["contrast_reference"] = "drs_only_q1_median_and_mad"
+        for group_name in ("overestimation", "underestimation"):
+            summary[f"{group_name}_mean_abs_contrast"] = float(
+                np.mean(np.abs(contrasts[model_name][group_name]))
+            )
+    return contrasts, summaries
+
+
+def compute_failure_comparison_contrasts(
+    drs_only_performance: pd.DataFrame,
+    residual_performance: pd.DataFrame,
+    signature_subject_ids: np.ndarray,
+    signatures: np.ndarray,
+) -> tuple[
+    dict[str, dict[str, np.ndarray]],
+    dict[str, dict[str, int | float | str]],
+]:
+    """Compare the baseline with DTOF-descriptor difficult groups."""
+    return _compute_model_specific_failure_contrasts(
+        {
+            "drs_only": drs_only_performance,
+            "residual_finetune_dtof": residual_performance,
+        },
+        signature_subject_ids,
+        signatures,
+    )
+
+
+def compute_feature_failure_comparison_contrasts(
+    drs_only_performance: pd.DataFrame,
+    dtof_performance: pd.DataFrame,
+    thickness_performance: pd.DataFrame,
+    signature_subject_ids: np.ndarray,
+    signatures: np.ndarray,
+) -> tuple[
+    dict[str, dict[str, np.ndarray]],
+    dict[str, dict[str, int | float | str]],
+]:
+    """Compare baseline, DTOF-descriptor, and tissue-thickness difficult groups."""
+    return _compute_model_specific_failure_contrasts(
+        {
+            "drs_only": drs_only_performance,
+            "residual_finetune_dtof": dtof_performance,
+            "residual_finetune_thickness": thickness_performance,
+        },
+        signature_subject_ids,
+        signatures,
+    )
+
+
+def _compute_iqr_consistency(
+    performance_by_model: dict[str, pd.DataFrame],
+    signature_subject_ids: np.ndarray,
+    signatures: np.ndarray,
+) -> dict[str, dict[str, np.ndarray]]:
+    """Mark channels whose difficult-group IQR stays on one side of Q1.
+
+    This is a descriptive within-group consistency marker, not a hypothesis
+    test. Every model selects its own difficult groups, while all models use
+    the baseline Q1 median/MAD reference used by the comparison heatmaps.
+    """
+    if "drs_only" not in performance_by_model:
+        raise KeyError("performance_by_model must contain a 'drs_only' reference.")
+    signature_index = {int(sid): index for index, sid in enumerate(signature_subject_ids)}
+    common_subject_set = set(signature_index)
+    for performance in performance_by_model.values():
+        common_subject_set &= set(performance.subject_id.astype(int))
+    common_subjects = sorted(common_subject_set)
+
+    frames = {
+        model_name: (
+            performance.drop_duplicates("subject_id", keep="last")
+            .assign(subject_id=lambda frame: frame.subject_id.astype(int))
+            .set_index("subject_id")
+            .loc[common_subjects]
+            .reset_index()
+        )
+        for model_name, performance in performance_by_model.items()
+    }
+    fixed_od = np.vstack([signatures[signature_index[sid]] for sid in common_subjects])
+    fixed_shape = fixed_od - fixed_od.mean(axis=1, keepdims=True)
+
+    reference_frame = frames["drs_only"]
+    reference_q25 = reference_frame.baseline_rmse.quantile(0.25)
+    reference_mask = reference_frame.baseline_rmse.to_numpy() <= reference_q25
+    reference_center = np.median(fixed_shape[reference_mask], axis=0)
+    mad = 1.4826 * np.median(
+        np.abs(fixed_shape[reference_mask] - reference_center), axis=0
+    )
+    positive = mad[np.isfinite(mad) & (mad > 1e-12)]
+    reference_scale = np.maximum(
+        mad,
+        np.percentile(positive, 10) if len(positive) else 1.0,
+    )
+    standardized = (fixed_shape - reference_center) / reference_scale
+
+    consistency: dict[str, dict[str, np.ndarray]] = {}
+    for model_name, frame in frames.items():
+        q75 = frame.baseline_rmse.quantile(0.75)
+        difficult = frame.baseline_rmse.to_numpy() >= q75
+        groups = {
+            "overestimation": difficult & (frame.baseline_bias.to_numpy() > 0),
+            "underestimation": difficult & (frame.baseline_bias.to_numpy() < 0),
+        }
+        consistency[model_name] = {}
+        for group_name, mask in groups.items():
+            q25, q75 = np.quantile(standardized[mask], [0.25, 0.75], axis=0)
+            consistency[model_name][group_name] = (
+                (q25 > 0) | (q75 < 0)
+            ).reshape(NUM_WAVELENGTHS, NUM_SDS)
+    return consistency
+
+
+def _annotate_heatmap_cell(
+    ax: plt.Axes,
+    sds_index: int,
+    wavelength_index: int,
+    value: float,
+    limit: float,
+    iqr_consistent: bool,
+    *,
+    fontsize: float,
+) -> None:
+    text_color = "white" if abs(value) > 0.58 * limit else "black"
+    ax.text(
+        sds_index,
+        wavelength_index,
+        f"{value:+.2f}",
+        ha="center",
+        va="center",
+        fontsize=fontsize,
+        color=text_color,
+    )
+    if iqr_consistent:
+        ax.scatter(
+            sds_index + 0.34,
+            wavelength_index - 0.32,
+            s=13,
+            marker="o",
+            facecolor=text_color,
+            edgecolor="black" if text_color == "white" else "white",
+            linewidth=0.35,
+            zorder=3,
+        )
+
+
 def make_subject_failure_figure(
     performance: pd.DataFrame,
     signature_subject_ids: np.ndarray,
@@ -198,6 +464,9 @@ def make_subject_failure_figure(
         signature_subject_ids,
         signatures,
     )
+    consistency = _compute_iqr_consistency(
+        {"drs_only": performance}, signature_subject_ids, signatures
+    )["drs_only"]
     limit = max(
         1e-12,
         max(float(np.abs(matrix).max()) for matrix in contrasts.values()),
@@ -219,14 +488,9 @@ def make_subject_failure_figure(
         for wl in range(NUM_WAVELENGTHS):
             for sds in range(NUM_SDS):
                 value = matrix[wl, sds]
-                ax.text(
-                    sds,
-                    wl,
-                    f"{value:+.2f}",
-                    ha="center",
-                    va="center",
+                _annotate_heatmap_cell(
+                    ax, sds, wl, value, limit, bool(consistency[name][wl, sds]),
                     fontsize=8.5,
-                    color="white" if abs(value) > 0.58 * limit else "black",
                 )
         ax.set_xticks(range(NUM_SDS), SDS_LABELS)
         ax.set_yticks(range(NUM_WAVELENGTHS), [str(value) for value in WAVELENGTHS_NM])
@@ -249,10 +513,11 @@ def make_subject_failure_figure(
         pad=0.025,
     )
     colorbar.set_label("Relative optical-density shape contrast (robust z)")
-    unit = str(target_info["unit"])
-    threshold_format = ".3f" if target_mode == "hc" else ".4f"
-    q25_text = format(float(summary["rmse_q25"]), threshold_format)
-    q75_text = format(float(summary["rmse_q75"]), threshold_format)
+    unit = target_error_unit(target_mode)
+    display_scale = target_display_scale(target_mode)
+    threshold_format = ".3f" if target_mode == "hc" else ".2f"
+    q25_text = format(float(summary["rmse_q25"]) * display_scale, threshold_format)
+    q75_text = format(float(summary["rmse_q75"]) * display_scale, threshold_format)
     fig.suptitle(
         f"DRS spectral-shape contrasts for difficult {target_info['display']} subjects",
         fontsize=14,
@@ -262,23 +527,284 @@ def make_subject_failure_figure(
     fig.text(
         0.5,
         0.02,
-        f"Reference: DRS-only Q1 (RMSE ≤ {q25_text} {unit}, n = {summary['accurate_n']}); "
-        f"difficult: DRS-only Q4 (RMSE ≥ {q75_text} {unit}, n = {summary['difficult_n']}).",
+        f"Reference: baseline Q1 (RMSE ≤ {q25_text} {unit}, n = {summary['accurate_n']}); "
+        f"difficult: baseline Q4 (RMSE ≥ {q75_text} {unit}, n = {summary['difficult_n']}).\n"
+        "Dot: the difficult-group channel-wise IQR remains on one side of the Q1 median.",
         ha="center",
         va="bottom",
         fontsize=9,
     )
-    fig.subplots_adjust(left=0.08, right=0.88, bottom=0.16, top=0.82, wspace=0.16)
+    fig.subplots_adjust(left=0.08, right=0.88, bottom=0.19, top=0.82, wspace=0.16)
     output_path = output_dir / f"subject_failure_{target_mode}.png"
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
+    for group_name, matrix in consistency.items():
+        summary[f"{group_name}_iqr_consistent_channels"] = int(matrix.sum())
     return {
         "target": target_mode,
         "target_display": str(target_info["display"]),
         "figure": str(output_path),
         **summary,
     }
+
+
+def make_subject_failure_comparison_figure(
+    drs_only_performance: pd.DataFrame,
+    residual_performance: pd.DataFrame,
+    signature_subject_ids: np.ndarray,
+    signatures: np.ndarray,
+    output_dir: str | Path,
+    target_mode: str,
+    *,
+    dpi: int = 300,
+) -> list[dict[str, int | float | str]]:
+    """Save a shared-scale 2x2 baseline versus DTOF-descriptor figure."""
+    target_mode = _normalize_target_mode(target_mode)
+    target_info = TARGET_INFO[target_mode]
+    contrasts, summaries = compute_failure_comparison_contrasts(
+        drs_only_performance,
+        residual_performance,
+        signature_subject_ids,
+        signatures,
+    )
+    consistency = _compute_iqr_consistency(
+        {
+            "drs_only": drs_only_performance,
+            "residual_finetune_dtof": residual_performance,
+        },
+        signature_subject_ids,
+        signatures,
+    )
+    limit = max(
+        1e-12,
+        max(
+            float(np.abs(matrix).max())
+            for model_contrasts in contrasts.values()
+            for matrix in model_contrasts.values()
+        ),
+    )
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    model_rows = (
+        ("drs_only", BASELINE_DISPLAY),
+        ("residual_finetune_dtof", "DTOF descriptor"),
+    )
+    group_columns = (
+        ("overestimation", "Overestimation"),
+        ("underestimation", "Underestimation"),
+    )
+    fig, axes = plt.subplots(2, 2, figsize=(12.8, 9.2), sharex=True, sharey=True)
+    image = None
+    panel = 0
+    for row, (model_name, model_display) in enumerate(model_rows):
+        for column, (group_name, group_display) in enumerate(group_columns):
+            ax = axes[row, column]
+            matrix = contrasts[model_name][group_name]
+            image = ax.imshow(
+                matrix,
+                cmap="RdBu_r",
+                vmin=-limit,
+                vmax=limit,
+                aspect="auto",
+            )
+            for wavelength_index in range(NUM_WAVELENGTHS):
+                for sds_index in range(NUM_SDS):
+                    value = matrix[wavelength_index, sds_index]
+                    _annotate_heatmap_cell(
+                        ax, sds_index, wavelength_index, value, limit,
+                        bool(consistency[model_name][group_name][wavelength_index, sds_index]),
+                        fontsize=8.2,
+                    )
+            ax.set_xticks(range(NUM_SDS), SDS_LABELS)
+            ax.set_yticks(
+                range(NUM_WAVELENGTHS),
+                [str(value) for value in WAVELENGTHS_NM],
+            )
+            group_n = int(summaries[model_name][f"{group_name}_n"])
+            ax.set_title(
+                f"{'ABCD'[panel]}  {model_display} | {group_display} (n = {group_n})",
+                loc="left",
+                fontweight="bold",
+                fontsize=10.5,
+            )
+            if row == 1:
+                ax.set_xlabel("Source–detector separation")
+            if column == 0:
+                ax.set_ylabel("Wavelength (nm)")
+            panel += 1
+
+    if image is None:
+        raise RuntimeError("No failure contrast was plotted.")
+    colorbar = fig.colorbar(image, ax=axes, fraction=0.025, pad=0.025)
+    colorbar.set_label(
+        "Robust z score relative to baseline Q1"
+    )
+    overlap_n = int(summaries["drs_only"]["difficult_overlap_n"])
+    fig.suptitle(
+        f"DRS spectral shapes of model-specific difficult {target_info['display']} subjects",
+        fontsize=14,
+        fontweight="bold",
+        y=0.985,
+    )
+    fig.text(
+        0.5,
+        0.018,
+        "Each model reselects Q1/Q4 by its own RMSE and splits Q4 by its own Bias; "
+        f"all panels use the baseline Q1 median/MAD reference and one color scale. "
+        f"Difficult-group overlap: n = {overlap_n}.\n"
+        "Dot: the difficult-group channel-wise IQR remains on one side of the Q1 median.",
+        ha="center",
+        va="bottom",
+        fontsize=8.6,
+    )
+    fig.subplots_adjust(left=0.08, right=0.88, bottom=0.14, top=0.91, hspace=0.29, wspace=0.16)
+    output_path = output_dir / f"subject_failure_comparison_{target_mode}.png"
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+
+    for model_name, model_consistency in consistency.items():
+        for group_name, matrix in model_consistency.items():
+            summaries[model_name][f"{group_name}_iqr_consistent_channels"] = int(
+                matrix.sum()
+            )
+    return [
+        {
+            "target": target_mode,
+            "target_display": str(target_info["display"]),
+            "figure": str(output_path),
+            "shared_color_limit": float(limit),
+            **summaries[model_name],
+        }
+        for model_name, _ in model_rows
+    ]
+
+
+def make_subject_failure_feature_comparison_figure(
+    drs_only_performance: pd.DataFrame,
+    dtof_performance: pd.DataFrame,
+    thickness_performance: pd.DataFrame,
+    signature_subject_ids: np.ndarray,
+    signatures: np.ndarray,
+    output_dir: str | Path,
+    target_mode: str,
+    *,
+    dpi: int = 300,
+) -> list[dict[str, int | float | str]]:
+    """Save a shared-scale 3x2 failure-phenotype comparison by feature source."""
+    target_mode = _normalize_target_mode(target_mode)
+    target_info = TARGET_INFO[target_mode]
+    contrasts, summaries = compute_feature_failure_comparison_contrasts(
+        drs_only_performance,
+        dtof_performance,
+        thickness_performance,
+        signature_subject_ids,
+        signatures,
+    )
+    consistency = _compute_iqr_consistency(
+        {
+            "drs_only": drs_only_performance,
+            "residual_finetune_dtof": dtof_performance,
+            "residual_finetune_thickness": thickness_performance,
+        },
+        signature_subject_ids,
+        signatures,
+    )
+    limit = max(
+        1e-12,
+        max(
+            float(np.abs(matrix).max())
+            for model_contrasts in contrasts.values()
+            for matrix in model_contrasts.values()
+        ),
+    )
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    model_rows = (
+        ("drs_only", BASELINE_DISPLAY),
+        ("residual_finetune_dtof", "DTOF descriptor"),
+        (
+            "residual_finetune_thickness",
+            "Tissue-thickness feature",
+        ),
+    )
+    group_columns = (
+        ("overestimation", "Overestimation"),
+        ("underestimation", "Underestimation"),
+    )
+    fig, axes = plt.subplots(3, 2, figsize=(12.8, 12.6), sharex=True, sharey=True)
+    image = None
+    panel = 0
+    for row, (model_name, model_display) in enumerate(model_rows):
+        for column, (group_name, group_display) in enumerate(group_columns):
+            ax = axes[row, column]
+            matrix = contrasts[model_name][group_name]
+            image = ax.imshow(
+                matrix,
+                cmap="RdBu_r",
+                vmin=-limit,
+                vmax=limit,
+                aspect="auto",
+            )
+            for wavelength_index in range(NUM_WAVELENGTHS):
+                for sds_index in range(NUM_SDS):
+                    value = matrix[wavelength_index, sds_index]
+                    _annotate_heatmap_cell(
+                        ax, sds_index, wavelength_index, value, limit,
+                        bool(consistency[model_name][group_name][wavelength_index, sds_index]),
+                        fontsize=8.0,
+                    )
+            ax.set_xticks(range(NUM_SDS), SDS_LABELS)
+            ax.set_yticks(
+                range(NUM_WAVELENGTHS),
+                [str(value) for value in WAVELENGTHS_NM],
+            )
+            group_n = int(summaries[model_name][f"{group_name}_n"])
+            ax.set_title(
+                f"{'ABCDEF'[panel]}  {model_display} | {group_display} (n = {group_n})",
+                loc="left",
+                fontweight="bold",
+                fontsize=10.0,
+            )
+            if column == 0:
+                ax.set_ylabel("Wavelength (nm)")
+            panel += 1
+
+    if image is None:
+        raise RuntimeError("No failure contrast was plotted.")
+    colorbar = fig.colorbar(image, ax=axes, fraction=0.02, pad=0.025)
+    colorbar.set_label(
+        "Robust z score relative to baseline Q1"
+    )
+    fig.subplots_adjust(
+        left=0.08,
+        right=0.88,
+        bottom=0.06,
+        top=0.98,
+        hspace=0.31,
+        wspace=0.16,
+    )
+    output_path = output_dir / f"subject_failure_feature_comparison_{target_mode}.png"
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+
+    for model_name, model_consistency in consistency.items():
+        for group_name, matrix in model_consistency.items():
+            summaries[model_name][f"{group_name}_iqr_consistent_channels"] = int(
+                matrix.sum()
+            )
+    return [
+        {
+            "target": target_mode,
+            "target_display": str(target_info["display"]),
+            "figure": str(output_path),
+            "shared_color_limit": float(limit),
+            **summaries[model_name],
+        }
+        for model_name, _ in model_rows
+    ]
 
 
 def make_figure2(

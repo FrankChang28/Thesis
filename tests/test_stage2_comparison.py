@@ -27,7 +27,7 @@ def _frame() -> pd.DataFrame:
     ):
         rows.append(
             {
-                "target": "hc", "experiment": "DRS only", "training_mode": "baseline",
+                "target": "hc", "experiment": "DRS-only baseline", "training_mode": "baseline",
                 "feature_source": "baseline", "fusion_method": "none",
                 "training_strategy": "scratch", "structure_control": "none",
                 "subject_id": subject_id, "RMSE": baseline_rmse, "MAE": baseline_rmse - 0.2,
@@ -36,7 +36,7 @@ def _frame() -> pd.DataFrame:
         )
         rows.append(
             {
-                "target": "hc", "experiment": "DTOF latent | Residual | Fine-tune",
+                "target": "hc", "experiment": "DTOF descriptor | Gated residual | Fine-tuning",
                 "training_mode": "residual", "feature_source": "latent",
                 "fusion_method": "residual", "training_strategy": "finetune",
                 "structure_control": "actual", "subject_id": subject_id,
@@ -63,7 +63,7 @@ def _complete_heterogeneity_frame(methods=("residual",)) -> pd.DataFrame:
             rows.append(
                 {
                     **common,
-                    "experiment": "DRS only",
+                    "experiment": "DRS-only baseline",
                     "training_mode": "baseline",
                     "feature_source": "baseline",
                     "fusion_method": "none",
@@ -104,7 +104,7 @@ def test_holm_adjustment_is_monotone() -> None:
 
 def test_final_table_contains_requested_statistics() -> None:
     frame = _frame()
-    detail, paired = paired_comparisons(frame, "DRS only")
+    detail, paired = paired_comparisons(frame, "DRS-only baseline")
     table = build_final_experiment_table(frame, paired)
     formatted = format_final_experiment_table(table)
     fusion = table[table["feature_source"] == "latent"].iloc[0]
@@ -121,7 +121,7 @@ def test_final_table_contains_requested_statistics() -> None:
 
 def test_heterogeneity_matrix_uses_common_baseline_quartiles() -> None:
     frame = _complete_heterogeneity_frame()
-    paired_detail, _ = paired_comparisons(frame, "DRS only")
+    paired_detail, _ = paired_comparisons(frame, "DRS-only baseline")
     detail = build_heterogeneous_benefit_detail(frame, paired_detail, "residual")
     summary = summarize_heterogeneous_benefit(detail)
 
@@ -167,7 +167,7 @@ def test_heterogeneity_fallback_uses_one_complete_method() -> None:
 
 def test_heterogeneity_plot_is_created(tmp_path) -> None:
     frame = _complete_heterogeneity_frame()
-    paired_detail, _ = paired_comparisons(frame, "DRS only")
+    paired_detail, _ = paired_comparisons(frame, "DRS-only baseline")
     detail = build_heterogeneous_benefit_detail(frame, paired_detail, "residual")
     output = plot_heterogeneous_benefit(
         detail,
