@@ -15,6 +15,8 @@ BaselineTrain = Literal["frozen", "finetune"]
 FusionMethod = Literal["concatenation", "residual", "film"]
 StructureControl = Literal["actual", "zero", "shuffle"]
 SubjectFeatureSource = Literal["dtof", "metadata"]
+ExecutionMode = Literal["train", "descriptor_control"]
+DescriptorControlMode = Literal["none", "zero", "shuffle", "random_acquisition"]
 
 
 @dataclass
@@ -48,6 +50,7 @@ class Config:
     residual_gate_init_logit: float = 0.0
 
     run_name_suffix: str = "main"
+    execution_mode: ExecutionMode = "train"
 
     # ------------------------------------------------------------------
     # Data and output paths
@@ -73,6 +76,16 @@ class Config:
 
     structure_control: StructureControl = "actual"
     structure_shuffle_seed: int = 2026
+
+    # Frozen-checkpoint, test-time descriptor controls.
+    descriptor_control_mode: DescriptorControlMode = "none"
+    descriptor_control_repeats: int = 30
+    descriptor_control_seed: int = 20260913
+    descriptor_control_checkpoint_path: Optional[str] = None
+    descriptor_control_acquisition_path: str = (
+        "./artifacts/stage1/{test_id}/relat_cons_32/"
+        "test_acquisition_embeddings.npz"
+    )
 
     # ------------------------------------------------------------------
     # LOSO split
@@ -250,6 +263,12 @@ class Config:
     @property
     def artifact_relative_dir(self) -> str:
         """Return the compact, semantic path below ``output_root``."""
+        if self.execution_mode == "descriptor_control":
+            return os.path.join(
+                "descriptor_controls",
+                self.descriptor_control_mode,
+                self.target_mode,
+            )
         if self.experiment_mode == "baseline":
             return os.path.join("baseline", self.target_mode)
 
@@ -302,6 +321,10 @@ class Config:
         self._validate_optimization()
 
     def _validate_experiment(self) -> None:
+        if self.execution_mode not in {"train", "descriptor_control"}:
+            raise ValueError(
+                "execution_mode must be 'train' or 'descriptor_control'"
+            )
         if self.target_mode not in {"hc", "sto2"}:
             raise ValueError("target_mode must be 'hc' or 'sto2'")
         if self.experiment_mode not in {"baseline", "fusion"}:
@@ -318,6 +341,33 @@ class Config:
             raise ValueError("subject_feature_source must be 'dtof' or 'metadata'")
         if self.structure_control not in {"actual", "zero", "shuffle"}:
             raise ValueError("structure_control must be 'actual', 'zero', or 'shuffle'")
+        if self.descriptor_control_mode not in {
+            "none",
+            "zero",
+            "shuffle",
+            "random_acquisition",
+        }:
+            raise ValueError("invalid descriptor_control_mode")
+
+        if self.execution_mode == "descriptor_control":
+            if self.experiment_mode != "fusion" or self.subject_feature_source != "dtof":
+                raise ValueError(
+                    "descriptor controls require DTOF fusion configuration"
+                )
+            if self.descriptor_control_mode == "none":
+                raise ValueError(
+                    "descriptor_control_mode is required for descriptor controls"
+                )
+            if not self.descriptor_control_checkpoint_path:
+                raise ValueError(
+                    "descriptor_control_checkpoint_path is required"
+                )
+            if self.descriptor_control_repeats <= 0:
+                raise ValueError("descriptor_control_repeats must be positive")
+        elif self.descriptor_control_mode != "none":
+            raise ValueError(
+                "descriptor_control_mode must be 'none' during training"
+            )
 
         if self.experiment_mode == "baseline":
             if self.baseline_init != "scratch":

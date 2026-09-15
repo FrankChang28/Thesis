@@ -109,8 +109,9 @@ def _apply_control(
     features: np.ndarray,
     test_id: int,
     train_subjects: np.ndarray,
+    val_subjects: np.ndarray,
 ) -> Tuple[np.ndarray, str]:
-    """Apply actual, zero, or leakage-safe shuffled subject features."""
+    """Apply actual, zero, or split-safe shuffled subject features."""
     mode = str(CFG.structure_control).strip().lower()
 
     if mode == "actual":
@@ -128,35 +129,51 @@ def _apply_control(
         int(CFG.structure_shuffle_seed) + int(test_id)
     )
 
-    shuffled = features.copy()
-    all_subjects = np.arange(CFG.num_subjects, dtype=np.int64)
-    heldout_subjects = np.setdiff1d(
-        all_subjects,
-        train_subjects,
-        assume_unique=False,
+    val_subjects = np.asarray(val_subjects, dtype=np.int64).reshape(-1)
+    test_subjects = np.asarray([test_id], dtype=np.int64)
+    split_subjects = np.concatenate(
+        (train_subjects, val_subjects, test_subjects)
     )
+    if (
+        split_subjects.size != CFG.num_subjects
+        or np.unique(split_subjects).size != CFG.num_subjects
+        or not np.array_equal(
+            np.sort(split_subjects),
+            np.arange(CFG.num_subjects, dtype=np.int64),
+        )
+    ):
+        raise ValueError(
+            "train, validation, and test subjects must be disjoint and "
+            "cover every subject before shuffling"
+        )
+
+    shuffled = features.copy()
 
     descriptions = []
 
-    # Shuffle inside each split so validation/test features are never moved
-    # into training subjects during the negative-control experiment.
+    # Training and validation are deranged independently. This preserves each
+    # split's descriptor distribution without attaching a subject's own
+    # descriptor to its DRS rows.
     for name, group in (
         ("train", train_subjects),
-        ("heldout", heldout_subjects),
+        ("validation", val_subjects),
     ):
         group = np.asarray(group, dtype=np.int64)
 
         if group.size <= 1:
-            # A derangement is impossible for a singleton. Zero is safer than
-            # leaving the subject's true feature attached to itself.
-            shuffled[group] = 0.0
-            descriptions.append(f"{name}_zero_singleton")
-            continue
+            raise ValueError(f"{name} split needs at least two subjects to shuffle")
 
         shift = int(rng.integers(1, group.size))
         source_ids = np.roll(group, shift)
         shuffled[group] = features[source_ids]
         descriptions.append(f"{name}_shift_{shift}")
+
+    # The held-out test subject receives a wrong descriptor sampled only from
+    # training subjects. Its own descriptor therefore cannot affect training
+    # or validation, and validation cannot act as a transductive donor.
+    test_donor = int(rng.choice(train_subjects))
+    shuffled[test_id] = features[test_donor]
+    descriptions.append(f"test_donor_{test_donor}")
 
     return shuffled.astype(np.float32), "shuffle:" + ",".join(descriptions)
 
@@ -322,6 +339,7 @@ def load_metadata_bank(
 def load_structure_bank(
     test_id: int,
     train_subjects: Sequence[int],
+    val_subjects: Sequence[int],
 ) -> Tuple[np.ndarray, str]:
     """Load and normalize exactly one configured subject-feature source."""
     train_subjects_array = _validate_train_subjects(train_subjects)
@@ -361,6 +379,7 @@ def load_structure_bank(
         bank,
         test_id=test_id,
         train_subjects=train_subjects_array,
+        val_subjects=np.asarray(val_subjects, dtype=np.int64),
     )
 
     print(

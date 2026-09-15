@@ -1,0 +1,15 @@
+target_mode: hc
+execution_mode: descriptor_control
+experiment_mode: fusion
+subject_feature_source: dtof
+baseline_init: pretrained
+baseline_train: finetune
+fusion_method: residual
+structure_feature_dim: 32
+structure_feature_path: ./artifacts/stage1/{test_id}/relat_cons_32/subject_features_all_op.npz
+descriptor_control_mode: random_acquisition
+descriptor_control_repeats: 30
+descriptor_control_seed: 20260913
+descriptor_control_acquisition_path: ./artifacts/stage1/{test_id}/relat_cons_32/test_acquisition_embeddings.npz
+descriptor_control_checkpoint_path: ./artifacts/stage2/residual/finetune/dtof/hc/best_model_fold_{fold:03d}_test_id_{test_id}.pth
+resume: true

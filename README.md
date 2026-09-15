@@ -220,6 +220,47 @@ report all failures at the end. If the training interpreter differs from the
 one running the orchestration script, pass `--python /path/to/python` or set
 `SUBJECT_NIRS_PYTHON`.
 
+### 4.8 DTOF descriptor controls
+
+Zero-vector and shuffled-subject are training-time negative controls. Each
+config starts from the matching-fold DRS-only checkpoint, then retrains the
+gated-residual fusion model with the same Stage 2 optimization budget as the
+actual DTOF model. Zero replaces every standardized descriptor with zero.
+Shuffle uses one fixed, deterministic subject mapping per fold: training and
+validation subjects are deranged separately, while the test subject receives
+a donor descriptor from a training subject. Each subject still has one vector
+broadcast to all of its DRS rows. These controls need no new Stage 1 export:
+
+```bash
+bash scripts/run_stage2_loso.sh configs/stage2/controls/zero/hc.yaml
+bash scripts/run_stage2_loso.sh configs/stage2/controls/zero/sto2.yaml
+bash scripts/run_stage2_loso.sh configs/stage2/controls/shuffle/hc.yaml
+bash scripts/run_stage2_loso.sh configs/stage2/controls/shuffle/sto2.yaml
+```
+
+Their outputs are written to
+`artifacts/stage2/residual/finetune/dtof_zero/<target>/` and
+`artifacts/stage2/residual/finetune/dtof_shuffle/<target>/`.
+
+Random single-acquisition is a frozen-checkpoint sensitivity analysis. For
+each of 30 deterministic repeats it selects one of the test subject's 2,700
+observed embeddings and broadcasts that vector to all test DRS rows. It first
+needs the acquisition embeddings for every fold. The export reuses existing
+Stage 1 checkpoints; it does not retrain Stage 1 or overwrite the descriptor
+NPZ:
+
+```bash
+bash scripts/run_stage1_test_acquisition_exports.sh
+bash scripts/run_stage2_loso.sh configs/stage2/controls/random_acquisition/hc.yaml
+bash scripts/run_stage2_loso.sh configs/stage2/controls/random_acquisition/sto2.yaml
+```
+
+The export wrapper accepts optional zero-based start/end test IDs, for example
+`bash scripts/run_stage1_test_acquisition_exports.sh 0 9`. Random-acquisition
+outputs are written below
+`artifacts/stage2/descriptor_controls/random_acquisition/<target>/`; existing
+main-model checkpoints and LOSO result files are read only.
+
 ## 5. Notebooks and thesis analyses
 
 Start Jupyter or VS Code from the project root:
@@ -291,6 +332,18 @@ Notebooks 02–07 explicitly display their final summary table(s) and saved PNG 
 - **Writes:** resumable inference metrics under `artifacts/stage2/unseen_dataset_validation/<dataset>/<target>/`; paired detail/summary tables, metadata, and a two-panel PNG under `results/figures/stage2/unseen_dataset_validation/`.
 - **Display:** the final PNG and statistical summary table are also shown inline by the notebook.
 - **Resume:** completed fold JSONs are reused. `FOLDS='1,3,10-20'` runs a subset, although the paired final plot requires the same complete fold set as the original results. Predictions are off by default.
+
+### 08 — `08_stage2_descriptor_controls.ipynb`
+
+- **Purpose:** generate the Section 4.2.6 DTOF descriptor-control figures after the required experiments finish; the notebook does not train models or run descriptor-control inference.
+- **Completeness:** requires 154 unique LOSO subjects for Actual DTOF, retrained tHb zero-vector, and retrained tHb shuffled-subject results. Random-acquisition inputs must contain exactly 30 unique repeats for each of 154 subjects for both tHb and StO₂. Incomplete or duplicate results raise an explicit error rather than being plotted.
+- **Figure 1:** tHb paired `ΔRMSE = control − DTOF descriptor` distributions for Zero vector and Shuffled subject. Positive values indicate that the control is worse than the correctly paired DTOF descriptor. The figure has no overall title and uses the short y-axis label `ΔRMSE (µM)`.
+- **Figure 2:** tHb and StO₂ random single-acquisition sensitivity. Within each target, subjects are sorted by their median ΔRMSE across 30 draws; the line is the subject median and the shaded band is the within-subject IQR. StO₂ is displayed in percentage points.
+- **Writes:** both PNGs under `results/figures/stage2/descriptor_controls/`, plus paired subject details and a complete statistical summary under `results/tables/stage2/descriptor_controls/`.
+- **Statistics:** figures directly annotate paired ΔRMSE median `[Q1, Q3]`, worsened fraction, and paired Wilcoxon p-value. Figure 1 applies Holm correction across the two direct control-versus-DTOF comparisons and uses the same `$p_{Holm}$` notation as unseen validation. Each random-acquisition target displays its paired Wilcoxon p-value and the cross-subject median of the within-subject IQR across 30 draws. Rank-biserial effects, absolute RMSE, and all exact values remain available in the summary CSV but are omitted from the figures.
+- **Display:** each Matplotlib figure is closed after saving, then the saved PNG is displayed once to avoid duplicate inline output.
+- **Result schema:** the StO₂ LOSO metric is read from the case-sensitive column `test_GM_StO2_RMSE`.
+- **Display:** both saved figures and the complete summary table are shown inline after **Run All**.
 
 ## 6. Python module reference
 

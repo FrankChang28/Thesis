@@ -527,6 +527,7 @@ def run_loso() -> None:
                 structure_bank, structure_path = load_structure_bank(
                     test_id=test_id,
                     train_subjects=train_subjects,
+                    val_subjects=val_subjects,
                 )
                 structure_dim = int(structure_bank.shape[1])
 

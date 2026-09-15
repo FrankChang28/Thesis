@@ -9,7 +9,7 @@ import pandas as pd
 from subject_nirs.common.config import apply_dataclass_config, load_yaml
 from subject_nirs.stage2.config import Config
 from subject_nirs.stage2.config import CFG
-from subject_nirs.stage2.latent import load_metadata_bank
+from subject_nirs.stage2.latent import _apply_control, load_metadata_bank
 
 
 def test_metadata_bank_uses_training_subject_zscore(tmp_path, monkeypatch):
@@ -47,11 +47,32 @@ def test_stage2_configs_cover_complete_thesis_matrix():
     config_dir = Path(__file__).parents[1] / "configs" / "stage2"
     fusion_cells = set()
     baseline_targets = set()
+    training_controls = set()
 
     for config_path in sorted(config_dir.rglob("*.yaml")):
         config = Config()
         apply_dataclass_config(config, load_yaml(config_path))
         config.validate()
+
+        if config.execution_mode == "descriptor_control":
+            expected_relative_dir = (
+                Path("descriptor_controls")
+                / config.descriptor_control_mode
+                / config.target_mode
+            )
+            assert Path(config.output_dir) == Path(config.output_root) / expected_relative_dir
+            continue
+
+        if config.structure_control != "actual":
+            training_controls.add((config.target_mode, config.structure_control))
+            expected_relative_dir = (
+                Path(config.fusion_method)
+                / config.training_strategy
+                / f"{config.subject_feature_source}_{config.structure_control}"
+                / config.target_mode
+            )
+            assert Path(config.output_dir) == Path(config.output_root) / expected_relative_dir
+            continue
 
         if config.experiment_mode == "baseline":
             baseline_targets.add(config.target_mode)
@@ -86,3 +107,39 @@ def test_stage2_configs_cover_complete_thesis_matrix():
     )
     assert fusion_cells == expected_cells
     assert baseline_targets == {"hc", "sto2"}
+    assert training_controls == {
+        (target, control)
+        for target in ("hc", "sto2")
+        for control in ("zero", "shuffle")
+    }
+
+
+def test_training_shuffle_is_split_safe_and_deterministic(monkeypatch):
+    features = np.arange(6, dtype=np.float32).reshape(-1, 1)
+    train_subjects = np.asarray([0, 1, 2], dtype=np.int64)
+    val_subjects = np.asarray([3, 4], dtype=np.int64)
+
+    monkeypatch.setattr(CFG, "num_subjects", 6)
+    monkeypatch.setattr(CFG, "structure_control", "shuffle")
+    monkeypatch.setattr(CFG, "structure_shuffle_seed", 20260913)
+
+    first, first_description = _apply_control(
+        features,
+        test_id=5,
+        train_subjects=train_subjects,
+        val_subjects=val_subjects,
+    )
+    second, second_description = _apply_control(
+        features,
+        test_id=5,
+        train_subjects=train_subjects,
+        val_subjects=val_subjects,
+    )
+
+    np.testing.assert_array_equal(first, second)
+    assert first_description == second_description
+    assert set(first[train_subjects, 0]) == set(features[train_subjects, 0])
+    assert set(first[val_subjects, 0]) == set(features[val_subjects, 0])
+    assert np.all(first[train_subjects, 0] != features[train_subjects, 0])
+    assert np.all(first[val_subjects, 0] != features[val_subjects, 0])
+    assert first[5, 0] in set(features[train_subjects, 0])

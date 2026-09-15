@@ -43,6 +43,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--save_path", type=str, required=True)
+    parser.add_argument(
+        "--test_acquisition_save_path",
+        type=str,
+        default="",
+        help=(
+            "Optional separate NPZ for every observed acquisition embedding "
+            "of the checkpoint test subject"
+        ),
+    )
+    parser.add_argument(
+        "--skip_descriptor_save",
+        action="store_true",
+        help=(
+            "Do not rewrite --save_path. Intended for adding the separate "
+            "test-acquisition export to an existing Stage 1 fold."
+        ),
+    )
 
     parser.add_argument(
         "--max_samples_per_subject",
@@ -196,6 +213,35 @@ def _validate_and_sort_features(
     return subject_ids, latent_raw
 
 
+def _select_test_acquisitions(
+    payload: Mapping[str, np.ndarray],
+    test_subject_id: int,
+    expected_positions: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return one test subject's observed embeddings ordered by OP position."""
+    embeddings = np.asarray(payload["z"], dtype=np.float32)
+    subject_ids = np.asarray(payload["subject_ids"], dtype=np.int64).reshape(-1)
+    op_positions = np.asarray(payload["op_positions"], dtype=np.int64).reshape(-1)
+    mask = subject_ids == int(test_subject_id)
+    selected = embeddings[mask]
+    selected_positions = op_positions[mask]
+    order = np.argsort(selected_positions)
+    selected = selected[order]
+    selected_positions = selected_positions[order]
+    expected_positions = np.asarray(expected_positions, dtype=np.int64).reshape(-1)
+    if selected.shape != (expected_positions.size, embeddings.shape[1]):
+        raise ValueError(
+            "Test acquisition export has an unexpected shape: "
+            f"{selected.shape}, expected "
+            f"{(expected_positions.size, embeddings.shape[1])}"
+        )
+    if not np.array_equal(selected_positions, expected_positions):
+        raise ValueError("Test acquisition OP positions are incomplete or reordered")
+    if not np.isfinite(selected).all():
+        raise ValueError("Test acquisition embeddings contain NaN or Inf")
+    return selected.astype(np.float32), selected_positions
+
+
 def main(args: argparse.Namespace) -> None:
     checkpoint_path = Path(
         args.checkpoint
@@ -259,6 +305,24 @@ def main(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
     model.to(device).eval()
 
+    train_subjects = _subject_array(checkpoint, "train_subjects")
+    val_subjects = _subject_array(checkpoint, "val_subjects")
+    test_subjects = _subject_array(checkpoint, "test_subjects")
+    _validate_subject_partition(
+        num_subjects=int(bundle.num_subjects),
+        train_subjects=train_subjects,
+        val_subjects=val_subjects,
+        test_subjects=test_subjects,
+    )
+    if args.test_acquisition_save_path and test_subjects.size != 1:
+        raise ValueError(
+            "Test-acquisition export requires exactly one checkpoint test subject"
+        )
+    if args.skip_descriptor_save and not args.test_acquisition_save_path:
+        raise ValueError(
+            "--skip_descriptor_save requires --test_acquisition_save_path"
+        )
+
     if args.max_samples_per_subject > 0:
         rng = np.random.default_rng(seed + 999)
 
@@ -280,11 +344,13 @@ def main(args: argparse.Namespace) -> None:
             dtype=np.int64,
         )
 
+    export_subjects = (
+        test_subjects
+        if args.skip_descriptor_save
+        else np.arange(bundle.num_subjects, dtype=np.int64)
+    )
     loader = bundle.make_subject_loader(
-        subjects=np.arange(
-            bundle.num_subjects,
-            dtype=np.int64,
-        ),
+        subjects=export_subjects,
         op_positions=positions,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -302,35 +368,37 @@ def main(args: argparse.Namespace) -> None:
             "collect_embeddings() must return 'z' and 'subject_ids'"
         )
 
-    subject_ids, latent_raw = select_nearest_to_spherical_center(
-        payload["z"],
-        payload["subject_ids"],
-    )
+    if args.test_acquisition_save_path:
+        acquisition_embeddings, acquisition_positions = _select_test_acquisitions(
+            payload,
+            int(test_subjects[0]),
+            positions,
+        )
+        acquisition_path = Path(args.test_acquisition_save_path).expanduser().resolve()
+        acquisition_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            acquisition_path,
+            test_acquisition_latent_raw=acquisition_embeddings,
+            test_acquisition_op_positions=acquisition_positions,
+            test_subject_id=np.asarray(int(test_subjects[0]), dtype=np.int64),
+            matlab_test_subject_id=np.asarray(int(test_subjects[0]) + 1, dtype=np.int64),
+            source_checkpoint=np.asarray(str(checkpoint_path)),
+            aggregation=np.asarray("all_observed_acquisitions"),
+        )
+        print("Saved test-subject acquisition embeddings")
+        print(f"  path: {acquisition_path}")
+        print(f"  shape: {acquisition_embeddings.shape}")
 
+    if args.skip_descriptor_save:
+        return
+
+    subject_ids, latent_raw = select_nearest_to_spherical_center(
+        payload["z"], payload["subject_ids"]
+    )
     subject_ids, latent_raw = _validate_and_sort_features(
         subject_ids=subject_ids,
         latent_raw=latent_raw,
         num_subjects=int(bundle.num_subjects),
-    )
-
-    train_subjects = _subject_array(
-        checkpoint,
-        "train_subjects",
-    )
-    val_subjects = _subject_array(
-        checkpoint,
-        "val_subjects",
-    )
-    test_subjects = _subject_array(
-        checkpoint,
-        "test_subjects",
-    )
-
-    _validate_subject_partition(
-        num_subjects=int(bundle.num_subjects),
-        train_subjects=train_subjects,
-        val_subjects=val_subjects,
-        test_subjects=test_subjects,
     )
 
     holdout_subject_ids = np.unique(

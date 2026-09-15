@@ -15,9 +15,14 @@ def main() -> None:
     apply_dataclass_config(CFG, load_yaml(args.config))
 
     # Import after applying the config so the workflow sees one authoritative CFG.
-    from subject_nirs.stage2.loso import run_loso
+    if CFG.execution_mode == "descriptor_control":
+        from subject_nirs.stage2.descriptor_controls import run_descriptor_controls
 
-    run_loso()
+        run_descriptor_controls()
+    else:
+        from subject_nirs.stage2.loso import run_loso
+
+        run_loso()
 
 
 if __name__ == "__main__":

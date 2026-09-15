@@ -149,6 +149,14 @@ def discover_statuses(config_root: Path, targets: set[str] | None) -> list[Exper
     seen_outputs: dict[Path, Path] = {}
     for config_path in config_paths:
         config, status = load_status(config_path)
+        if config.execution_mode != "train":
+            # Descriptor controls are explicit frozen-checkpoint evaluations,
+            # not part of the remaining training matrix.
+            continue
+        if config.structure_control != "actual":
+            # Training-time negative controls are launched explicitly with
+            # run_stage2_loso.sh; do not mix them into the primary matrix queue.
+            continue
         if targets is not None and config.target_mode not in targets:
             continue
         if not status.is_complete and not config.resume:
