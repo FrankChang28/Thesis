@@ -1246,7 +1246,7 @@ def plot_heterogeneous_benefit(
     )
     base_x = np.arange(1, 5, dtype=float)
     source_offsets = {"latent": -0.18, "metadata": 0.18}
-    panel_labels = iter("ABCD")
+    panel_labels = iter(("(a)", "(b)", "(c)", "(d)"))
 
     for row, strategy in enumerate(HETEROGENEITY_STRATEGIES):
         for col, target in enumerate(HETEROGENEITY_TARGETS):
@@ -1348,15 +1348,7 @@ def plot_heterogeneous_benefit(
         stem = f"heterogeneous_benefit_{fusion_method}_preview_for_{preview_for}"
         fig.suptitle(title, y=0.995, fontsize=14, fontweight="bold")
         figure_top = 0.84
-    fig.text(
-        0.5,
-        0.012,
-        "Negative ΔRMSE indicates improvement. Q1–Q4 are defined once from "
-        "the held-out-subject baseline RMSE for each target.",
-        ha="center",
-        va="bottom",
-        fontsize=9,
-    )
+        
     fig.subplots_adjust(
         left=0.08,
         right=0.98,

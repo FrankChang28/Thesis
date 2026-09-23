@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import os
+import re
 from pathlib import Path
 
 import matplotlib
@@ -28,17 +29,26 @@ from .display import (
 COLORS = ("#4472C4", "#ED7D31", "#70AD47", "#A5A5A5")
 CONDITION_LABELS = {
     "unseen_scattering": ("MK-1", "MK-2", "MK-3", "MK-4"),
-    "unseen_wm": ("G2-1", "G2-2", "G2-3"),
+    "unseen_wm": ("G2-1′", "G2-2′", "G2-3′"),
 }
+ORIGINAL_PREDICTION_RE = re.compile(
+    r"fold_(?P<fold>\d+)_test_id_(?P<test_id>\d+)_test_predictions\.npz$"
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot paired delta-RMSE distributions.")
     parser.add_argument("--original_csv", type=Path, required=True)
+    parser.add_argument("--original_prediction_dir", type=Path, required=True)
+    parser.add_argument("--original_conditions", type=int, default=3)
+    parser.add_argument("--rows_per_original_condition", type=int, default=12960)
     parser.add_argument("--target", choices=("hc", "sto2"), required=True)
     parser.add_argument(
-        "--new_dataset", nargs=4, action="append", required=True,
-        metavar=("KEY", "LABEL", "EXPECTED_CONDITIONS", "PER_SIM_CSV"),
+        "--new_dataset", nargs=5, action="append", required=True,
+        metavar=(
+            "KEY", "LABEL", "EXPECTED_CONDITIONS", "PARENT_CONDITIONS",
+            "PER_SIM_CSV",
+        ),
     )
     parser.add_argument(
         "--output_dir", type=Path,
@@ -63,7 +73,7 @@ def read_csv(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def original_rmse_by_fold(path: Path, target: str) -> dict[int, tuple[int, float]]:
+def original_fold_summary(path: Path, target: str) -> dict[int, tuple[int, float]]:
     rows = read_csv(path)
     column = {"hc": "test_GM_hc_RMSE", "sto2": "test_GM_StO2_RMSE"}[target]
     missing = {"fold", "test_id", column} - set(rows[0])
@@ -80,7 +90,79 @@ def original_rmse_by_fold(path: Path, target: str) -> dict[int, tuple[int, float
     return result
 
 
-def paired_deltas(path, original, dataset_key, dataset_label, expected_conditions):
+def original_rmse_by_fold_condition(
+    path: Path,
+    prediction_dir: Path,
+    target: str,
+    rows_per_condition: int,
+    expected_conditions: int,
+) -> dict[tuple[int, int], tuple[int, float]]:
+    if rows_per_condition <= 0 or expected_conditions <= 0:
+        raise ValueError("Original condition counts and row counts must be positive")
+    fold_summary = original_fold_summary(path, target)
+    result: dict[tuple[int, int], tuple[int, float]] = {}
+    expected_rows = rows_per_condition * expected_conditions
+    for fold, (test_id, pooled_rmse) in fold_summary.items():
+        prediction_path = prediction_dir / (
+            f"fold_{fold:03d}_test_id_{test_id}_test_predictions.npz"
+        )
+        if not prediction_path.is_file():
+            raise FileNotFoundError(prediction_path)
+        match = ORIGINAL_PREDICTION_RE.match(prediction_path.name)
+        if match is None or int(match.group("fold")) != fold or int(match.group("test_id")) != test_id:
+            raise ValueError(f"Unexpected original prediction filename: {prediction_path}")
+        with np.load(prediction_path) as prediction:
+            missing = {"y_true", "y_pred"} - set(prediction.files)
+            if missing:
+                raise ValueError(
+                    f"{prediction_path} is missing arrays: {sorted(missing)}"
+                )
+            y_true = np.asarray(prediction["y_true"], dtype=np.float64).reshape(-1)
+            y_pred = np.asarray(prediction["y_pred"], dtype=np.float64).reshape(-1)
+        if y_true.shape != y_pred.shape or y_true.size != expected_rows:
+            raise ValueError(
+                f"Unexpected original prediction shapes for fold {fold}: "
+                f"true={y_true.shape}, pred={y_pred.shape}, expected rows={expected_rows}"
+            )
+        error = y_pred - y_true
+        pooled_from_predictions = float(np.sqrt(np.mean(error**2)))
+        if not np.isclose(pooled_from_predictions, pooled_rmse, rtol=1e-5, atol=1e-6):
+            raise ValueError(
+                f"Fold {fold} pooled RMSE mismatch: csv={pooled_rmse}, "
+                f"predictions={pooled_from_predictions}"
+            )
+        for condition in range(1, expected_conditions + 1):
+            start = (condition - 1) * rows_per_condition
+            stop = condition * rows_per_condition
+            rmse = float(np.sqrt(np.mean(error[start:stop] ** 2)))
+            result[(fold, condition)] = (test_id, rmse)
+    return result
+
+
+def parse_parent_conditions(
+    text: str, expected_conditions: int, original_conditions: int
+) -> tuple[int, ...]:
+    try:
+        values = tuple(int(value.strip()) for value in text.split(","))
+    except ValueError as error:
+        raise ValueError(f"Invalid parent-condition mapping: {text!r}") from error
+    if len(values) != expected_conditions:
+        raise ValueError(
+            f"Parent mapping {text!r} has {len(values)} entries; "
+            f"expected {expected_conditions}"
+        )
+    if any(value < 1 or value > original_conditions for value in values):
+        raise ValueError(
+            f"Parent mapping {text!r} must use original conditions "
+            f"1..{original_conditions}"
+        )
+    return values
+
+
+def paired_deltas(
+    path, original, dataset_key, dataset_label, expected_conditions,
+    parent_conditions,
+):
     rows = read_csv(path)
     required = {"fold", "test_id", "sim_number_1based", "RMSE"}
     missing = required - set(rows[0])
@@ -94,9 +176,14 @@ def paired_deltas(path, original, dataset_key, dataset_label, expected_condition
             raise ValueError(f"Duplicate fold/condition {(fold, condition)} in {path}")
         seen.add((fold, condition))
         conditions.add(condition)
-        if fold not in original:
-            raise ValueError(f"Fold {fold} from {path} is absent from original results")
-        original_test_id, original_rmse = original[fold]
+        parent_condition = int(parent_conditions[condition - 1])
+        reference_key = (fold, parent_condition)
+        if reference_key not in original:
+            raise ValueError(
+                f"Fold/parent condition {reference_key} from {path} is absent "
+                "from original results"
+            )
+        original_test_id, original_rmse = original[reference_key]
         if test_id != original_test_id:
             raise ValueError(
                 f"Fold {fold} test_id mismatch: original={original_test_id}, new={test_id}"
@@ -107,15 +194,17 @@ def paired_deltas(path, original, dataset_key, dataset_label, expected_condition
         detail.append({
             "dataset_key": dataset_key, "dataset_label": dataset_label,
             "condition": condition, "fold": fold, "test_id": test_id,
+            "reference_condition": parent_condition,
             "original_RMSE": original_rmse, "new_RMSE": new_rmse,
             "delta_RMSE": new_rmse - original_rmse,
         })
     expected = set(range(1, expected_conditions + 1))
     if conditions != expected:
         raise ValueError(f"{dataset_label} has conditions {sorted(conditions)}; expected {sorted(expected)}")
+    original_folds = {fold for fold, _ in original}
     for condition in conditions:
         folds = {int(row["fold"]) for row in detail if row["condition"] == condition}
-        if folds != set(original):
+        if folds != original_folds:
             raise ValueError(f"{dataset_label} condition {condition} lacks matched original folds")
     return detail
 
@@ -258,15 +347,36 @@ def draw_panel(ax, detail, summary_rows, color, letter, unit, seed):
 
 def main():
     args = parse_args()
-    if args.dpi <= 0 or args.bootstrap_samples <= 0:
-        raise ValueError("--dpi and --bootstrap_samples must be positive")
-    original, detail, specs = original_rmse_by_fold(args.original_csv, args.target), [], []
-    for key, label, expected_text, csv_text in args.new_dataset:
+    if (
+        args.dpi <= 0 or args.bootstrap_samples <= 0
+        or args.original_conditions <= 0 or args.rows_per_original_condition <= 0
+    ):
+        raise ValueError("DPI, bootstrap samples, and original-condition sizes must be positive")
+    original = original_rmse_by_fold_condition(
+        args.original_csv,
+        args.original_prediction_dir,
+        args.target,
+        args.rows_per_original_condition,
+        args.original_conditions,
+    )
+    detail, specs = [], []
+    for key, label, expected_text, parent_text, csv_text in args.new_dataset:
         expected, path = int(expected_text), Path(csv_text)
         if expected <= 0:
             raise ValueError("EXPECTED_CONDITIONS must be positive")
-        detail.extend(paired_deltas(path, original, key, label, expected))
-        specs.append({"key": key, "label": label, "expected_conditions": expected, "csv": str(path.resolve())})
+        parents = parse_parent_conditions(
+            parent_text, expected, args.original_conditions
+        )
+        detail.extend(
+            paired_deltas(path, original, key, label, expected, parents)
+        )
+        specs.append({
+            "key": key,
+            "label": label,
+            "expected_conditions": expected,
+            "parent_conditions": list(parents),
+            "csv": str(path.resolve()),
+        })
     detail = scale_detail_for_display(detail, args.target)
     summary = summarize(detail, args.bootstrap_samples, args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -297,14 +407,22 @@ def main():
     fig.savefig(png_path, dpi=args.dpi, bbox_inches="tight", facecolor="white"); plt.close(fig)
     atomic_json(metadata_path, {
         "description": title,
-        "delta_definition": "new-condition subject RMSE minus original-validation subject RMSE",
-        "paired_unit": "held-out LOSO subject/fold", "original_csv": str(args.original_csv.resolve()),
+        "delta_definition": (
+            "new-condition subject RMSE minus the same subject's RMSE in the "
+            "matched original Group 2 parent condition"
+        ),
+        "paired_unit": "held-out LOSO subject/fold",
+        "original_csv": str(args.original_csv.resolve()),
+        "original_prediction_dir": str(args.original_prediction_dir.resolve()),
+        "original_conditions": args.original_conditions,
+        "rows_per_original_condition": args.rows_per_original_condition,
         "target": args.target, "unit": unit, "datasets": specs,
         "multiple_comparison": "Holm adjustment across all unseen conditions in this target figure",
         "effect_size": "matched-pairs rank-biserial correlation; positive means improvement relative to the original validation reference",
         "display_scale": target_display_scale(args.target),
         "bootstrap_samples": args.bootstrap_samples, "seed": args.seed,
-        "num_original_folds": len(original), "png": str(png_path.resolve()),
+        "num_original_folds": len({fold for fold, _ in original}),
+        "png": str(png_path.resolve()),
         "paired_detail_csv": str(detail_path.resolve()), "summary_csv": str(summary_path.resolve()),
         "matplotlib_version": matplotlib.__version__, "numpy_version": np.__version__,
     })

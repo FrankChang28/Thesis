@@ -7,11 +7,14 @@ import numpy as np
 import pandas as pd
 
 from subject_nirs.stage2.subject_failure import (
+    compute_failure_layer_thickness_summary,
     compute_feature_failure_comparison_contrasts,
     compute_failure_comparison_contrasts,
     compute_failure_contrasts,
     compute_subject_signatures,
     load_baseline_performance,
+    load_layer_thickness_metadata,
+    make_failure_layer_thickness_figure,
     make_subject_failure_comparison_figure,
     make_subject_failure_feature_comparison_figure,
     make_subject_failure_figure,
@@ -37,6 +40,19 @@ def _signatures() -> tuple[np.ndarray, np.ndarray]:
     return subject_ids, signatures
 
 
+def _thickness() -> pd.DataFrame:
+    subject_ids = np.arange(8)
+    return pd.DataFrame(
+        {
+            "subject_id": subject_ids,
+            "scalp": 2.0 + 0.1 * subject_ids,
+            "skull": 4.0 + 0.2 * subject_ids,
+            "csf": 1.0 + 0.3 * subject_ids,
+            "sinus": 0.5 + 0.4 * subject_ids,
+        }
+    )
+
+
 def test_target_specific_metric_loading(tmp_path: Path) -> None:
     frame = pd.DataFrame(
         {
@@ -56,14 +72,43 @@ def test_target_specific_metric_loading(tmp_path: Path) -> None:
     assert sto2["baseline_rmse"].tolist() == [0.04, 0.05]
 
 
+def test_layer_thickness_loading_uses_raw_mm(tmp_path: Path) -> None:
+    raw = pd.DataFrame(
+        {
+            "subject": ["A", "B"],
+            "sbj": [0, 1],
+            "scalp": [2.5, 3.5],
+            "skull": [4.5, 5.5],
+            "csf": [1.5, 2.5],
+            "sinus": [0.5, 1.5],
+        }
+    )
+    path = tmp_path / "metadata.csv"
+    raw.to_csv(path, index=False)
+    loaded = load_layer_thickness_metadata(path)
+
+    assert loaded["subject_id"].tolist() == [0, 1]
+    assert loaded["scalp"].tolist() == [2.5, 3.5]
+
+
 def test_failure_groups_and_contrasts() -> None:
     subject_ids, signatures = _signatures()
     contrasts, summary = compute_failure_contrasts(
         _performance(), subject_ids, signatures
     )
 
+    centered = signatures - signatures.mean(axis=1, keepdims=True)
+    reference_center = np.median(centered[:2], axis=0)
+    reference_scale = 1.4826 * np.median(
+        np.abs(centered[:2] - reference_center), axis=0
+    )
+    expected_overestimation = (
+        (centered[6] - reference_center) / reference_scale
+    ).reshape(5, 6)
+
     assert contrasts["overestimation"].shape == (5, 6)
     assert contrasts["underestimation"].shape == (5, 6)
+    np.testing.assert_allclose(contrasts["overestimation"], expected_overestimation)
     assert summary["common_n"] == 8
     assert summary["accurate_n"] == 2
     assert summary["difficult_n"] == 2
@@ -183,12 +228,54 @@ def test_feature_comparison_adds_thickness_on_the_same_scale(tmp_path: Path) -> 
     assert (tmp_path / "subject_failure_feature_comparison_sto2.png").is_file()
 
 
+def test_failure_layer_thickness_uses_baseline_groups_and_raw_mm(
+    tmp_path: Path,
+) -> None:
+    performance = _performance()
+    thickness = _thickness()
+    summary = compute_failure_layer_thickness_summary(
+        performance,
+        thickness,
+        n_bootstrap=200,
+        seed=7,
+    )
+
+    assert len(summary) == 8
+    assert set(summary["group"]) == {"overestimation", "underestimation"}
+    assert set(summary["layer"]) == {"scalp", "skull", "csf", "sinus"}
+    assert set(summary["reference_n"]) == {2}
+    assert set(summary["group_n"]) == {1}
+    scalp_over = summary[
+        (summary["group"] == "overestimation")
+        & (summary["layer"] == "scalp")
+    ].iloc[0]
+    np.testing.assert_allclose(scalp_over["reference_median_mm"], 2.05)
+    np.testing.assert_allclose(scalp_over["group_median_mm"], 2.6)
+    np.testing.assert_allclose(scalp_over["median_difference_mm"], 0.55)
+
+    plotted = make_failure_layer_thickness_figure(
+        {"hc": performance, "sto2": performance.copy()},
+        thickness,
+        tmp_path,
+        n_bootstrap=200,
+        seed=7,
+        dpi=72,
+    )
+    assert len(plotted) == 16
+    assert Path(plotted["figure"].iloc[0]).name == (
+        "subject_failure_layer_thickness.png"
+    )
+    assert (tmp_path / "subject_failure_layer_thickness.png").is_file()
+
+
 if __name__ == "__main__":
     test_failure_groups_and_contrasts()
     with TemporaryDirectory() as directory:
         root = Path(directory)
         test_target_specific_metric_loading(root)
+        test_layer_thickness_loading_uses_raw_mm(root)
         test_target_figures_use_distinct_filenames(root)
         test_model_comparison_uses_one_reference_and_distinct_output(root)
         test_feature_comparison_adds_thickness_on_the_same_scale(root)
+        test_failure_layer_thickness_uses_baseline_groups_and_raw_mm(root)
     print("stage2 subject-failure tests passed")

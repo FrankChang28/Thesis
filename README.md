@@ -77,11 +77,11 @@ data/
 │   │   └── temp_metadata_v2.csv
 │   └── stage2/
 │       └── NIRS_Absolute_Dataset_grid.mat
-├── NIRS_Absolute_Val_Dataset_new.mat
+├── NIRS_Absolute_Val_Dataset_diffAK.mat
 └── NIRS_Absolute_Val_Dataset_diffwm.mat
 ```
 
-Both separate validation MAT files are used only by notebook 07. They are read directly in batches and do not require the old cache format. `NIRS_Absolute_Val_Dataset_new.mat` contains four newly simulated wavelength-dependent μs′ sets produced by changing K; `NIRS_Absolute_Val_Dataset_diffwm.mat` contains the three original Group 2 optical-property μs′ sets. Large files may be symlinked instead of copied:
+Both separate validation MAT files are used only by notebook 07. They are read directly in batches and do not require the old cache format. `NIRS_Absolute_Val_Dataset_diffAK.mat` contains four newly simulated wavelength-dependent μs′ sets produced by changing K; `NIRS_Absolute_Val_Dataset_diffwm.mat` contains three conditions that retain each original Group 2 scalp/skull/gray-matter setting and change the WM/GM μs′ ratio. Large files may be symlinked instead of copied:
 
 ```bash
 ln -s /external/path/dataset_dtof.mat data/raw/stage1/dataset_dtof.mat
@@ -316,19 +316,19 @@ Notebooks 02–07 explicitly display their final summary table(s) and saved PNG 
 
 ### 06 — `06_stage2_subject_failure.ipynb`
 
-- **Purpose:** generate target-specific baseline figures, the original 2 × 2 DTOF comparison, and shared-scale 3 × 2 comparisons across the DRS-only baseline, DTOF descriptor, and tissue-thickness feature.
-- **Reads:** the complete tHb and StO₂ baseline, Gated residual + Fine-tuning + DTOF descriptor, and Gated residual + Fine-tuning + tissue-thickness LOSO results plus the Stage 2 validation cache.
+- **Purpose:** generate shared-scale 3 × 2 feature-source comparisons for tHb and StO₂, plus a compact anatomical-context plot for baseline-defined difficult subjects.
+- **Reads:** the complete tHb and StO₂ baseline, Gated residual + Fine-tuning + DTOF descriptor, Gated residual + Fine-tuning + tissue-thickness LOSO results, the Stage 2 validation cache, and raw layer thicknesses from `data/temp_metadata_v2.csv`.
 - **Groups:** each model independently defines Q1 and Q4 from its own held-out-subject RMSE and splits Q4 into over- and under-estimation by its own signed Bias.
-- **Computes:** equal-target-weight subject DRS signatures and subject-wise mean-centered spectral shapes. The comparison figure expresses all model rows relative to the baseline Q1 channel-wise median and MAD and uses one symmetric color scale; color differences therefore reflect changed model-specific difficult-group membership, not altered DRS measurements. A cell marker indicates that the difficult-group channel-wise IQR remains entirely on one side of the Q1 median.
-- **Writes:** the original `subject_failure_hc.png` and `subject_failure_sto2.png`; the DTOF-only `subject_failure_comparison_<target>.png`; the three-model `subject_failure_feature_comparison_<target>.png`; plus rebuildable summary CSVs under `results/tables/stage2/subject_failure/`.
-- **Display:** all three summary tables and all target-specific baseline/comparison PNGs are shown inline after **Run All**.
+- **Computes:** equal-target-weight subject DRS signatures and subject-wise mean-centered spectral shapes. Each channel uses the baseline Q1 median and Gaussian-consistent scale `1.4826 × MAD`; the comparison figure uses one symmetric color scale across all model rows. Color differences therefore reflect changed model-specific difficult-group membership, not altered DRS measurements. A cell marker indicates that the difficult-group channel-wise IQR remains entirely on one side of the Q1 median. The anatomical-context analysis fixes the DRS-only Q1/Q4 groups and reports each High-OE/High-UE group median minus the Q1 median for scalp, skull, CSF, and frontal-sinus thickness in raw mm, with 10,000 subject-level bootstrap replicates for 95% confidence intervals.
+- **Writes:** `subject_failure_feature_comparison_hc.png`, `subject_failure_feature_comparison_sto2.png`, `subject_failure_layer_thickness.png`, and their rebuildable summary CSVs under `results/tables/stage2/subject_failure/`.
+- **Display:** the feature-comparison summary, the two 3 × 2 target heatmaps, and the layer-thickness context figure are shown inline after **Run All**.
 
 ### 07 — `07_unseen_dataset_validation.ipynb`
 
-- **Purpose:** evaluate frozen DRS-only baselines on four modified-K wavelength-dependent μs′ sets and three conditions that keep the original Group 2 scalp/skull/gray-matter μs′ fixed while changing the WM/GM μs′ multiplier, then compare each condition with the same subject's RMSE on the original validation dataset.
+- **Purpose:** evaluate frozen DRS-only baselines on four modified-K wavelength-dependent μs′ sets and three conditions that keep the original Group 2 scalp/skull/gray-matter μs′ fixed while changing the WM/GM μs′ multiplier. Each new condition is compared with the same subject's RMSE in its matched original Group 2 parent condition (Modified-K: 1→1, 2→2, 3→2, 4→3; Modified-WM/GM: 1→1, 2→2, 3→3).
 - **Parameters:** `TARGET='hc'` or `'sto2'`; `FOLDS=None` for all; `DEVICE='auto'`, `'cpu'`, `'cuda'`, or e.g. `'cuda:1'`.
-- **Reads:** both separate validation MAT files, the target's baseline checkpoints, and the original `loso_results.csv`.
-- **Computes:** subject-level paired ΔRMSE (`new condition RMSE − original validation RMSE`), paired Wilcoxon tests, Holm-adjusted p-values, matched-pairs rank-biserial effects (positive means improvement), and bootstrap confidence intervals for the median. Thesis-facing StO₂ errors are reported on the percentage scale (`%`; native fractions multiplied by 100).
+- **Reads:** both separate validation MAT files, the target's baseline checkpoints, original per-fold test predictions, and `loso_results.csv`.
+- **Computes:** subject-level paired ΔRMSE (`new-condition RMSE − matched-parent RMSE`), paired Wilcoxon tests, Holm-adjusted p-values, matched-pairs rank-biserial effects, and bootstrap confidence intervals for the median. Thesis-facing StO₂ errors are reported on the percentage-point scale (native fractions multiplied by 100).
 - **Writes:** resumable inference metrics under `artifacts/stage2/unseen_dataset_validation/<dataset>/<target>/`; paired detail/summary tables, metadata, and a two-panel PNG under `results/figures/stage2/unseen_dataset_validation/`.
 - **Display:** the final PNG and statistical summary table are also shown inline by the notebook.
 - **Resume:** completed fold JSONs are reused. `FOLDS='1,3,10-20'` runs a subset, although the paired final plot requires the same complete fold set as the original results. Predictions are off by default.
