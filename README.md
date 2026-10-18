@@ -1,388 +1,69 @@
-# Subject-aware NIRS modeling
+# 跨個體 NIRS 預測專案
 
-Code for the two-stage subject-aware NIRS pipeline used in the thesis:
+本專案包含論文使用的兩階段流程：第一階段從 DTOF 學習個體描述子，第二階段以 DRS 為主要輸入，結合個體資訊預測 HC／tHb 與 StO₂。主要實驗使用 32 維 DTOF 描述子與 gated residual 融合；其他融合方式與控制實驗也保留在設定檔中。
 
-1. **Stage 1 — representation learning:** learn a subject-level representation from DTOF measurements.
-2. **Stage 2 — absolute prediction:** combine DRS measurements with the Stage 1 representation to predict absolute HC or StO₂.
+以下指令均在專案根目錄（`pyproject.toml` 所在位置）執行。完整 154-fold LOSO 訓練需要對應資料與足夠運算資源；初次閱讀可先查看 notebook 與既有結果，不必重新訓練。
 
-The main thesis configuration is a **32-dimensional Stage 1 representation** and a **gated residual Stage 2 fusion model**. A 16D sensitivity experiment and an optional FiLM comparison are retained as YAML configurations. Unless stated otherwise, run every command below from the repository root (the directory containing `pyproject.toml`).
+## 目錄導覽
 
-## Repository layout
+| 目錄 | 用途 |
+| --- | --- |
+| `configs/` | 第一、二階段及控制實驗的 YAML 設定。 |
+| `data/` | 原始資料與資料放置說明；大型或私人資料不納入版本控制。 |
+| `src/subject_nirs/stage1/` | DTOF 表徵學習、匯出與第一階段分析。 |
+| `src/subject_nirs/stage2/` | DRS 預測、特徵融合與第二階段結果分析。 |
+| `scripts/` | 訓練、匯出、續跑與基本檢查的執行入口。 |
+| `notebooks/` | 依論文分析順序整理的圖表與結果檢視。 |
+| `artifacts/` | 模型權重及預測輸出；由訓練程序建立。 |
+| `cache/` | 可重建的前處理快取。 |
+| `results/tables/`、`results/figures/` | 分析表格與圖檔。 |
+| `tests/` | 快速測試。 |
 
-```text
-configs/                         Reproducible Stage 1/Stage 2 YAML configurations
-data/README.md                   Private-data placement instructions
-notebooks/01_... to 07_...       Ordered thesis analyses and figures
-scripts/train_stage1.py          Train one Stage 1 LOSO fold
-scripts/export_subject_features.py  Export one fold's full-OP features
-scripts/run_stage1_loso.sh       Train/export all 154 Stage 1 folds
-scripts/train_stage2.py          Stage 2 entry point driven by YAML
-scripts/run_stage2_loso.sh       Stage 2 wrapper (154 folds by default)
-scripts/smoke_test.py            Data-free model construction/forward check
-src/subject_nirs/stage1/         Stage 1 implementation and analyses
-src/subject_nirs/stage2/         Stage 2 implementation and analyses
-tests/                           Fast configuration and resume tests
-artifacts/                       Local checkpoints/predictions (not committed)
-cache/                           Rebuildable preprocessing caches (not committed)
-results/figures/                 Curated thesis PNGs (may be committed)
-results/tables/                  Rebuildable tables (not committed)
-```
+分析程式以研究問題分工；notebook 主要負責串接分析與展示圖表。圖表的共用繪製邏輯盡量放在 `src/`，避免同一張圖在多處各自維護。
 
-The old `Result_plot/`, `tpbm_prediction/`, exploratory manifold/evaluation programs, and unused `blending.py` are intentionally excluded.
+## 安裝與確認
 
-## 1. Environment setup
-
-Python 3.10 or newer is required.
+需要 Python 3.10 以上版本及適合本機的 PyTorch 環境。可使用既有 Conda 環境，或先建立虛擬環境，再安裝專案：
 
 ```bash
-cd /path/to/final_refactored
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
 python -m pip install -e ".[notebook,test]"
-```
-
-An existing Conda environment can be used instead:
-
-```bash
-conda activate YOUR_ENV
-cd /path/to/final_refactored
-python -m pip install -e ".[notebook,test]"
-```
-
-Check PyTorch/CUDA and run the data-free tests:
-
-```bash
-python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.device_count())"
 python scripts/smoke_test.py
 pytest -q
 ```
 
-The shell wrappers use the active environment's `python`. To force a particular interpreter without editing them:
+資料位置與必要檔案見 [`data/README.md`](data/README.md)。資料、模型權重與分析結果不會由安裝指令產生。
 
-```bash
-export SUBJECT_NIRS_PYTHON=/path/to/conda/env/bin/python
-```
+## 使用順序
 
-## 2. Private data placement
+1. 準備 `data/` 中的資料，並檢查 `configs/` 的輸入／輸出路徑。
+2. 執行第一階段 LOSO 訓練與 DTOF 特徵匯出。若已有第一階段權重與 `subject_features_all_op.npz`，可直接沿用。
+3. 訓練第二階段 DRS-only baseline；Fine-tuning 融合實驗會使用對應 fold 的 baseline 權重。
+4. 執行所需融合或控制實驗，再依序閱讀 `notebooks/` 中的分析。
 
-Datasets, metadata, caches, checkpoints, and predictions are excluded from Git. Use this local layout:
-
-```text
-data/
-├── raw/
-│   ├── stage1/
-│   │   ├── dataset_dtof.mat
-│   │   ├── dataset_OP.mat
-│   │   └── temp_metadata_v2.csv
-│   └── stage2/
-│       └── NIRS_Absolute_Dataset_grid.mat
-├── NIRS_Absolute_Val_Dataset_diffAK.mat
-└── NIRS_Absolute_Val_Dataset_diffwm.mat
-```
-
-Both separate validation MAT files are used only by notebook 07. They are read directly in batches and do not require the old cache format. `NIRS_Absolute_Val_Dataset_diffAK.mat` contains four newly simulated wavelength-dependent μs′ sets produced by changing K; `NIRS_Absolute_Val_Dataset_diffwm.mat` contains three conditions that retain each original Group 2 scalp/skull/gray-matter setting and change the WM/GM μs′ ratio. Large files may be symlinked instead of copied:
-
-```bash
-ln -s /external/path/dataset_dtof.mat data/raw/stage1/dataset_dtof.mat
-```
-
-## 3. Stage 1 — DTOF representation learning
-
-### 3.1 Train one fold
-
-The test subject ID is zero-based (`0`–`153`). This trains fold 0 with the main 32D configuration:
-
-```bash
-python scripts/train_stage1.py \
-  --config configs/stage1_32.yaml \
-  --data_dir data/raw/stage1 \
-  --output_dir artifacts/stage1/0/relat_cons_32 \
-  --test_id 0 \
-  --amp \
-  --skip_tsne
-```
-
-Important outputs are `best_model.pt`, `evaluation_metrics.json`, `run_config.json`, `subject_features_eval_grid.npz`, and `training_history.png` under the fold directory. `--amp` enables CUDA mixed precision; remove it on CPU. `--skip_tsne` avoids a costly visualization not needed for the main results.
-
-### 3.2 Export one fold's full-OP features
-
-Stage 2 consumes `subject_features_all_op.npz`, not only the evaluation-grid NPZ:
-
-```bash
-python scripts/export_subject_features.py \
-  --checkpoint artifacts/stage1/0/relat_cons_32/best_model.pt \
-  --data_dir data/raw/stage1 \
-  --save_path artifacts/stage1/0/relat_cons_32/subject_features_all_op.npz \
-  --amp
-```
-
-The checkpoint fold, directory number, and exported feature fold must match. The exported `latent_raw` array is the default Stage 2 feature. It is the observed DTOF acquisition embedding nearest that subject's spherical center; the center itself is not exported as the descriptor. New exports also provide the descriptive alias `dtof_descriptor_raw`.
-
-### 3.3 Run all 154 folds
+常用入口如下。這些 LOSO 指令預設涵蓋全部 154 個 fold，不適合作為快速測試：
 
 ```bash
 bash scripts/run_stage1_loso.sh
-```
-
-The wrapper loops over test IDs `0..153`; each fold is trained and then exported. To run 16D, change both `CONFIG` and `OUTPUT_DIR` in the wrapper from `stage1_32`/`relat_cons_32` to `stage1_16`/`relat_cons_16`. Stage 1 does not automatically skip completed folds; when restarting, change the loop range (for example `{37..153}`) or run only the required folds individually.
-
-## 4. Stage 2 — absolute HC/StO₂ prediction
-
-YAML values override defaults in `src/subject_nirs/stage2/config.py`. Thus `target_mode`, `experiment_mode`, and `fusion_method` are not fixed by their dataclass defaults when a config is passed.
-
-### 4.1 Required order
-
-1. Complete all Stage 1 folds and export every `subject_features_all_op.npz`.
-2. Train the DRS-only HC and/or StO₂ baselines.
-3. Train residual (main) or FiLM (optional) fusion from those checkpoints.
-4. Run notebooks 04–07.
-
-Stage 2 reads `data/raw/stage2/NIRS_Absolute_Dataset_grid.mat`. Rebuildable preprocessing and compact subsets are stored under `cache/stage2/`.
-
-### 4.2 Train DRS-only baselines
-
-```bash
 bash scripts/run_stage2_loso.sh configs/stage2/baseline/hc.yaml
 bash scripts/run_stage2_loso.sh configs/stage2/baseline/sto2.yaml
-```
-
-Equivalent direct calls:
-
-```bash
-python scripts/train_stage2.py --config configs/stage2/baseline/hc.yaml
-python scripts/train_stage2.py --config configs/stage2/baseline/sto2.yaml
-```
-
-Outputs go to `artifacts/stage2/baseline/hc/` and `artifacts/stage2/baseline/sto2/`. These configs enable `save_predictions: true` because notebook 04 needs prediction NPZs in addition to `loso_results.csv`.
-
-### 4.3 Train the main residual models
-
-```bash
 bash scripts/run_stage2_loso.sh configs/stage2/residual/finetune/dtof_hc.yaml
 bash scripts/run_stage2_loso.sh configs/stage2/residual/finetune/dtof_sto2.yaml
 ```
 
-Calling the wrapper without an argument defaults to HC residual. Outputs are:
-
-```text
-artifacts/stage2/residual/finetune/dtof/hc/
-artifacts/stage2/residual/finetune/dtof/sto2/
-```
-
-### 4.4 Optional FiLM comparison
-
-```bash
-bash scripts/run_stage2_loso.sh configs/stage2/film/finetune/dtof_hc.yaml
-```
-
-FiLM is retained as a comparison; residual is the main model. The complete Stage 2 config matrix is organized as
-`configs/stage2/<fusion_method>/<finetune|scratch>/<dtof|metadata>_<hc|sto2>.yaml`.
-Fusion artifacts mirror the same factors under
-`artifacts/stage2/<fusion_method>/<finetune|scratch>/<dtof|metadata>/<hc|sto2>/`.
-
-For every LOSO fold, both DTOF descriptors and the four tissue-thickness
-features are standardized with z-score statistics fitted only on that
-fold's training subjects. Validation and held-out test subjects use those same
-training-fold statistics without clipping.
-
-### 4.5 Use 16D Stage 1 features
-
-Copy the relevant residual/FiLM YAML and change both fields:
-
-```yaml
-structure_feature_dim: 16
-structure_feature_path: ./artifacts/stage1/{test_id}/relat_cons_16/subject_features_all_op.npz
-```
-
-### 4.6 Stop and resume safely
-
-All supplied Stage 2 configs use `resume: true`. On startup the runner audits the output directory. A fold is skipped only when it has both a valid global `test_id` row in `loso_results.csv` and the matching checkpoint. For artifacts moved from the legacy flat layout, the audit also accepts the recorded checkpoint basename in the current experiment directory, so historical CSV files do not need to be rewritten. An interrupted fold is rerun, while completed folds retain their global subject mapping. Re-execute the same command after interruption; do not manually renumber folds. Use `resume: false` only for an intentional new run/output directory.
-
-### 4.7 Run all remaining Stage 2 experiments
-
-Preview the completion audit and pending queue without starting training:
+單一 fold 可改用 `scripts/train_stage1.py` 或 `scripts/train_stage2.py`；其他融合方式、訓練策略與目標參數可由 `configs/stage2/` 選擇。查看尚未完成的第二階段工作，可先執行：
 
 ```bash
 python scripts/run_remaining_stage2.py --dry-run
 ```
 
-Run every incomplete config sequentially. Completed experiments are skipped and
-partially completed experiments resume from their existing valid folds:
+## 結果分析
+
+`notebooks/00`–`03` 檢視 DTOF 個體差異、表徵檢索、OP 穩健性／CKA 與結構探針；`04`–`08` 檢視 baseline、融合比較、失敗個體、未見資料及描述子控制實驗。Notebook 內有各圖的說明與對應參數，建議依編號閱讀。
+
+CKA 的 mean、跨 fold SD、單參數 OP transition 與 conditional 圖由同一繪圖模組產生。已有 `results/tables/stage1/cka_relat_cons_32/` 的分析摘要時，只重畫圖、不重新執行模型推論，可使用：
 
 ```bash
-python scripts/run_remaining_stage2.py
+python -m subject_nirs.stage1.cka_plotting --analysis_dir results/tables/stage1/cka_relat_cons_32
 ```
 
-Use `--target hc` or `--target sto2` to restrict the queue. The runner stops at
-the first failed config by default; add `--continue-on-error` to continue and
-report all failures at the end. If the training interpreter differs from the
-one running the orchestration script, pass `--python /path/to/python` or set
-`SUBJECT_NIRS_PYTHON`.
-
-### 4.8 DTOF descriptor controls
-
-Zero-vector and shuffled-subject are training-time negative controls. Each
-config starts from the matching-fold DRS-only checkpoint, then retrains the
-gated-residual fusion model with the same Stage 2 optimization budget as the
-actual DTOF model. Zero replaces every standardized descriptor with zero.
-Shuffle uses one fixed, deterministic subject mapping per fold: training and
-validation subjects are deranged separately, while the test subject receives
-a donor descriptor from a training subject. Each subject still has one vector
-broadcast to all of its DRS rows. These controls need no new Stage 1 export:
-
-```bash
-bash scripts/run_stage2_loso.sh configs/stage2/controls/zero/hc.yaml
-bash scripts/run_stage2_loso.sh configs/stage2/controls/zero/sto2.yaml
-bash scripts/run_stage2_loso.sh configs/stage2/controls/shuffle/hc.yaml
-bash scripts/run_stage2_loso.sh configs/stage2/controls/shuffle/sto2.yaml
-```
-
-Their outputs are written to
-`artifacts/stage2/residual/finetune/dtof_zero/<target>/` and
-`artifacts/stage2/residual/finetune/dtof_shuffle/<target>/`.
-
-Random single-acquisition is a frozen-checkpoint sensitivity analysis. For
-each of 30 deterministic repeats it selects one of the test subject's 2,700
-observed embeddings and broadcasts that vector to all test DRS rows. It first
-needs the acquisition embeddings for every fold. The export reuses existing
-Stage 1 checkpoints; it does not retrain Stage 1 or overwrite the descriptor
-NPZ:
-
-```bash
-bash scripts/run_stage1_test_acquisition_exports.sh
-bash scripts/run_stage2_loso.sh configs/stage2/controls/random_acquisition/hc.yaml
-bash scripts/run_stage2_loso.sh configs/stage2/controls/random_acquisition/sto2.yaml
-```
-
-The export wrapper accepts optional zero-based start/end test IDs, for example
-`bash scripts/run_stage1_test_acquisition_exports.sh 0 9`. Random-acquisition
-outputs are written below
-`artifacts/stage2/descriptor_controls/random_acquisition/<target>/`; existing
-main-model checkpoints and LOSO result files are read only.
-
-## 5. Notebooks and thesis analyses
-
-Start Jupyter or VS Code from the project root:
-
-```bash
-cd /path/to/final_refactored
-python -m jupyter lab
-# or: code .
-```
-
-Select the same environment as the notebook kernel, open a file under `notebooks/`, and choose **Run All**. The notebooks support a kernel working directory of either the root or `notebooks/` and locate the root with `pyproject.toml`.
-Notebooks 02–07 explicitly display their final summary table(s) and saved PNG figure(s) inline; the files are still written to `results/` for reproducible reuse.
-
-### 01 — `01_stage1_retrieval.ipynb`
-
-- **Purpose:** Stage 1 retrieval figure over 154 LOSO folds.
-- **Reads:** Stage 1 checkpoints and DTOF data. Set `EXPERIMENT='relat_cons_16'` for 16D.
-- **Computes:** Top-1 retrieval, within-subject distance, nearest-other distance, and margin.
-- **Writes:** fold metrics under `results/tables/stage1/full_grid_<experiment>/` and the curated PNG under `results/figures/stage1/`.
-- **Resume:** existing per-fold evaluation JSON files are reused.
-
-### 02 — `02_stage1_op_robustness_cka.ipynb`
-
-- **Purpose:** representation stability across optical-property changes using linear CKA.
-- **Reads:** Stage 1 checkpoints and `dataset_dtof.mat`.
-- **Computes:** full OP-pair CKA, transition summaries, and conditional effects.
-- **Writes:** rebuildable tables/cache under `results/tables/stage1/cka_<experiment>/` plus PNGs.
-- **Resume:** valid fold caches are reused.
-
-### 03 — `03_stage1_structure_probe.ipynb`
-
-- **Purpose:** test whether held-out embeddings contain structural thickness information.
-- **Reads:** all `subject_features_all_op.npz` and `data/raw/stage1/temp_metadata_v2.csv`.
-- **Computes:** nested ridge probing; scaling and alpha selection use training subjects only.
-- **Writes:** held-out predictions, metrics, and probe PNGs under `results/tables/stage1/structure_probe_32/`.
-
-### 04 — `04_stage2_baseline_evaluation.ipynb`
-
-- **Purpose:** evaluate the tHb and StO₂ DRS-only baselines.
-- **Reads:** both baseline directories, `loso_results.csv`, and prediction NPZ files.
-- **Computes:** subject-level calibration, RMSE, MAE, and signed bias.
-- **Writes:** tables under `results/tables/stage2/baseline/` and final baseline PNGs.
-
-### 05 — `05_stage2_fusion_comparison.ipynb`
-
-- **Purpose:** scan the full Stage 2 artifact tree and compare every completed configuration without mixing feature source, fusion method, or training strategy in the experiment label.
-- **Completeness:** runs with fewer than 154 unique LOSO subjects are warned about and excluded by default; `--include-incomplete` is intended only for diagnostics.
-- **Computes:** subject-level RMSE and signed bias median `[Q1, Q3]`; paired ΔRMSE median `[Q1, Q3]`; percentage of improved subjects; matched-pairs rank-biserial effect (positive means improvement); paired Wilcoxon p-values with Holm adjustment; and effects by baseline difficulty. The Section 4.2.3 analysis assigns each target's baseline held-out subjects to Q1–Q4 once and reuses those groups across feature sources and training strategies. Thesis-facing StO₂ errors are reported on the percentage scale (`%`; native fractions multiplied by 100).
-- **Writes:** numeric `final_experiment_table.csv`, thesis-readable `final_experiment_table_formatted.csv`, detailed rebuildable tables, `representative_loso_comparison.png`, and the fixed-method 2×2 `heterogeneous_benefit_<method>.png` plus its summary CSV under `results/tables/stage2/fusion_comparison/`.
-- **Representative figure:** defaults to Gated residual + Fine-tuning and includes the DRS-only baseline plus every completed actual feature source under that matched setting. Change `REPRESENTATIVE_METHOD` and `REPRESENTATIVE_STRATEGY` in the notebook after all experiments finish.
-- **Heterogeneous-benefit figure:** rows compare Scratch versus DRS-only-checkpoint Fine-tuning; columns show tHb versus StO₂; each panel compares the DTOF descriptor with the tissue-thickness feature across common baseline difficulty quartiles. The final method is Gated residual. While that matrix is incomplete, an optional whole-matrix Concatenation fallback produces an explicitly labelled preview and never fills individual missing cells with another operator.
-- **Display:** the formatted final table, representative PNG, heterogeneous-benefit manifest/table, and four-panel PNG are shown inline after **Run All**.
-
-### 06 — `06_stage2_subject_failure.ipynb`
-
-- **Purpose:** generate shared-scale 3 × 2 feature-source comparisons for tHb and StO₂, plus a compact anatomical-context plot for baseline-defined difficult subjects.
-- **Reads:** the complete tHb and StO₂ baseline, Gated residual + Fine-tuning + DTOF descriptor, Gated residual + Fine-tuning + tissue-thickness LOSO results, the Stage 2 validation cache, and raw layer thicknesses from `data/temp_metadata_v2.csv`.
-- **Groups:** each model independently defines Q1 and Q4 from its own held-out-subject RMSE and splits Q4 into over- and under-estimation by its own signed Bias.
-- **Computes:** equal-target-weight subject DRS signatures and subject-wise mean-centered spectral shapes. Each channel uses the baseline Q1 median and Gaussian-consistent scale `1.4826 × MAD`; the comparison figure uses one symmetric color scale across all model rows. Color differences therefore reflect changed model-specific difficult-group membership, not altered DRS measurements. A cell marker indicates that the difficult-group channel-wise IQR remains entirely on one side of the Q1 median. The anatomical-context analysis fixes the DRS-only Q1/Q4 groups and reports each High-OE/High-UE group median minus the Q1 median for scalp, skull, CSF, and frontal-sinus thickness in raw mm, with 10,000 subject-level bootstrap replicates for 95% confidence intervals.
-- **Writes:** `subject_failure_feature_comparison_hc.png`, `subject_failure_feature_comparison_sto2.png`, `subject_failure_layer_thickness.png`, and their rebuildable summary CSVs under `results/tables/stage2/subject_failure/`.
-- **Display:** the feature-comparison summary, the two 3 × 2 target heatmaps, and the layer-thickness context figure are shown inline after **Run All**.
-
-### 07 — `07_unseen_dataset_validation.ipynb`
-
-- **Purpose:** evaluate frozen DRS-only baselines on four modified-K wavelength-dependent μs′ sets and three conditions that keep the original Group 2 scalp/skull/gray-matter μs′ fixed while changing the WM/GM μs′ multiplier. Each new condition is compared with the same subject's RMSE in its matched original Group 2 parent condition (Modified-K: 1→1, 2→2, 3→2, 4→3; Modified-WM/GM: 1→1, 2→2, 3→3).
-- **Parameters:** `TARGET='hc'` or `'sto2'`; `FOLDS=None` for all; `DEVICE='auto'`, `'cpu'`, `'cuda'`, or e.g. `'cuda:1'`.
-- **Reads:** both separate validation MAT files, the target's baseline checkpoints, original per-fold test predictions, and `loso_results.csv`.
-- **Computes:** subject-level paired ΔRMSE (`new-condition RMSE − matched-parent RMSE`), paired Wilcoxon tests, Holm-adjusted p-values, matched-pairs rank-biserial effects, and bootstrap confidence intervals for the median. Thesis-facing StO₂ errors are reported on the percentage-point scale (native fractions multiplied by 100).
-- **Writes:** resumable inference metrics under `artifacts/stage2/unseen_dataset_validation/<dataset>/<target>/`; paired detail/summary tables, metadata, and a two-panel PNG under `results/figures/stage2/unseen_dataset_validation/`.
-- **Display:** the final PNG and statistical summary table are also shown inline by the notebook.
-- **Resume:** completed fold JSONs are reused. `FOLDS='1,3,10-20'` runs a subset, although the paired final plot requires the same complete fold set as the original results. Predictions are off by default.
-
-### 08 — `08_stage2_descriptor_controls.ipynb`
-
-- **Purpose:** generate the Section 4.2.6 DTOF descriptor-control figures after the required experiments finish; the notebook does not train models or run descriptor-control inference.
-- **Completeness:** requires 154 unique LOSO subjects for Actual DTOF, retrained tHb zero-vector, and retrained tHb shuffled-subject results. Random-acquisition inputs must contain exactly 30 unique repeats for each of 154 subjects for both tHb and StO₂. Incomplete or duplicate results raise an explicit error rather than being plotted.
-- **Figure 1:** tHb paired `ΔRMSE = control − DTOF descriptor` distributions for Zero vector and Shuffled subject. Positive values indicate that the control is worse than the correctly paired DTOF descriptor. The figure has no overall title and uses the short y-axis label `ΔRMSE (µM)`.
-- **Figure 2:** tHb and StO₂ random single-acquisition sensitivity. Within each target, subjects are sorted by their median ΔRMSE across 30 draws; the line is the subject median and the shaded band is the within-subject IQR. StO₂ is displayed in percentage points.
-- **Writes:** both PNGs under `results/figures/stage2/descriptor_controls/`, plus paired subject details and a complete statistical summary under `results/tables/stage2/descriptor_controls/`.
-- **Statistics:** figures directly annotate paired ΔRMSE median `[Q1, Q3]`, worsened fraction, and paired Wilcoxon p-value. Figure 1 applies Holm correction across the two direct control-versus-DTOF comparisons and uses the same `$p_{Holm}$` notation as unseen validation. Each random-acquisition target displays its paired Wilcoxon p-value and the cross-subject median of the within-subject IQR across 30 draws. Rank-biserial effects, absolute RMSE, and all exact values remain available in the summary CSV but are omitted from the figures.
-- **Display:** each Matplotlib figure is closed after saving, then the saved PNG is displayed once to avoid duplicate inline output.
-- **Result schema:** the StO₂ LOSO metric is read from the case-sensitive column `test_GM_StO2_RMSE`.
-- **Display:** both saved figures and the complete summary table are shown inline after **Run All**.
-
-## 6. Python module reference
-
-Most users should call the scripts/notebooks. These modules contain their implementation:
-
-| Module | Function |
-|---|---|
-| `stage1/config.py` | CLI/YAML parsing and validation |
-| `stage1/data.py` | DTOF/OP loading, split, preprocessing, grouped sampling |
-| `stage1/model.py` | DTOF subject encoder |
-| `stage1/losses.py` | contrastive and compactness losses |
-| `stage1/training.py` | training, model selection, early stopping |
-| `stage1/metrics.py` | representation/gallery metrics |
-| `stage1/runner.py` | complete one-fold workflow |
-| `stage1/exporter.py` | full-OP feature export |
-| `stage1/evaluation.py` | notebook 01 retrieval evaluation |
-| `stage1/cka.py`, `cka_plotting.py` | notebook 02 CKA compute/plots |
-| `stage1/probe.py` | notebook 03 nested ridge probe |
-| `stage1/visualization.py`, `utils.py` | plots and shared helpers |
-| `stage2/config.py` | defaults, YAML overrides, validation, run naming |
-| `stage2/cache.py`, `compact_cache.py` | HDF5 preprocessing and compact caches |
-| `stage2/datasets.py`, `sampling.py` | iterable data and deterministic sampling |
-| `stage2/model.py` | baseline, gated residual, and FiLM models |
-| `stage2/latent.py` | DTOF/metadata feature loading and controls |
-| `stage2/engine.py`, `metrics.py` | training/evaluation/prediction and metrics |
-| `stage2/loso.py` | 154-fold orchestration and resume audit |
-| `stage2/baseline_analysis.py` | notebook 04 analyses |
-| `stage2/comparison.py` | notebook 05 comparisons |
-| `stage2/subject_failure.py` | notebook 06 analysis |
-| `stage2/unseen_scattering.py` | notebook 07 direct-MAT inference |
-| `stage2/unseen_scattering_plot.py` | notebook 07 paired ΔRMSE plots and inference statistics |
-| `stage2/utils.py` | serialization and shared helpers |
-
-Examples of CLI help:
-
-```bash
-python -m subject_nirs.stage1.evaluation --help
-python -m subject_nirs.stage1.cka --help
-python -m subject_nirs.stage1.probe --help
-python -m subject_nirs.stage2.comparison --help
-python -m subject_nirs.stage2.unseen_scattering --help
-```
+若使用自訂輸出位置，請將 `--analysis_dir` 換成含有 `full_cka_summary.h5` 與 transition 摘要表的目錄。

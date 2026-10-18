@@ -390,7 +390,6 @@ def plot_prediction_scatter(
         unit_suffix = f" {thickness_unit}" if thickness_unit else ""
         annotation = (
             f"n = {metric.n}\n"
-            f"MAE = {metric.mae:.3f}{unit_suffix}\n"
             f"RMSE = {metric.rmse:.3f}{unit_suffix}\n"
             f"$R^2$ = {metric.r2:.3f}"
         )
@@ -410,8 +409,9 @@ def plot_prediction_scatter(
             },
         )
         ax.grid(alpha=0.22, linewidth=0.7)
-    fig.suptitle(title, fontsize=13, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    if title:
+        fig.suptitle(title, fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.94) if title else None)
     saved_paths = save_figure(fig, output_stem, plot_format, dpi)
     plt.close(fig)
     return saved_paths
